@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -66,6 +67,8 @@ OUTPUT_DEFAULT = _repo_root() / "runs/anima-aesthetic-v1.1"
 MODEL_DEFAULT = str(_default_model() or "")
 TEXT_ENCODER_DEFAULT = str(_default_text_encoder() or "")
 VAE_DEFAULT = str(_default_vae() or "")
+MLFLOW_URI_DEFAULT = os.environ.get("MLFLOW_TRACKING_URI", "https://mlflow.appmana.com")
+MLFLOW_EXPERIMENT_DEFAULT = "anima-aesthetic-v1.1-svdquant"
 
 app = typer.Typer(
     name="deepcompressor-svdquant",
@@ -152,6 +155,7 @@ def _load_ptq_model(model_path: Path):
 
 
 def command_quantize(args: SimpleNamespace) -> int:
+    import torch
 
     from deepcompressor.app.diffusion.nn.patch import shift_input_activations
     from deepcompressor.app.diffusion.ptq import ptq
@@ -159,44 +163,106 @@ def command_quantize(args: SimpleNamespace) -> int:
 
     from .config import build_anima_svdquant_config
     from .nunchaku import export_nunchaku_checkpoint
+    from .tracking import REFERENCE_FILENAME, ExperimentTracker
 
     output = Path(args.output).expanduser().resolve()
     quant_dir = output / "deepcompressor"
     packed_dir = output / "nunchaku"
     quant_dir.mkdir(parents=True, exist_ok=True)
     tools.logging.setup(path=str(output / "ptq.log"), level=tools.logging.INFO)
-    components, diffusion, struct_cls = _load_ptq_model(_require_path(args.model, "Anima Aesthetic 1.1 model"))
-    try:
-        # This is the published INT4 GELU shift. It is later consumed by
-        # Nunchaku's fused GELU/MLP kernel, not left as a Python-side op.
-        shift_input_activations(diffusion)
-        model = struct_cls.construct(diffusion)
-        config = build_anima_svdquant_config(
-            args.dataset,
-            rank=args.rank,
-            num_samples=args.num_samples,
-            num_iters=args.num_iters,
-            fast=args.fast,
-        )
-        ptq(
-            model,
-            config,
-            cache=None,
-            load_dirpath=str(quant_dir) if args.resume else "",
-            save_dirpath=str(quant_dir),
-            copy_on_save=True,
-            save_model=True,
-        )
-        weights, manifest = export_nunchaku_checkpoint(
-            model,
-            quant_dir,
-            packed_dir,
-            rank=args.rank,
-        )
-        print(json.dumps({"weights": str(weights), "manifest": str(manifest)}, indent=2))
-    finally:
-        components.close()
-        tools.logging.shutdown()
+    model_path = _require_path(args.model, "Anima Aesthetic 1.1 model")
+    dataset_path = Path(args.dataset).expanduser().resolve()
+    recipe = {
+        "base_model": "anima-aesthetic-v1.1",
+        "model_path": str(model_path),
+        "calibration_dataset": str(dataset_path),
+        "num_samples": args.num_samples,
+        "svd_rank": args.rank,
+        "low_rank_iterations": args.num_iters,
+        "svd_mode": "randomized" if args.fast else "exact",
+        "svd_oversample": 8,
+        "svd_power_iterations": 2,
+        "weight_dtype": "sint4",
+        "activation_dtype": "sint4",
+        "group_size": 64,
+        "low_rank_dtype": "bfloat16",
+        "fast": args.fast,
+        "resume": args.resume,
+        "runtime": "nunchaku",
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+        "cuda": torch.version.cuda or "",
+        "torch": torch.__version__,
+    }
+    recipe_path = output / "recipe.json"
+    recipe_path.write_text(json.dumps(recipe, indent=2) + "\n")
+    timings: dict[str, float] = {}
+    components = None
+    weights = manifest = None
+    tracker = ExperimentTracker(
+        enabled=args.track,
+        tracking_uri=args.mlflow_uri,
+        experiment_name=args.experiment_name,
+        run_name=args.run_name,
+        tags={"stage": "quantize", "recipe.fast": args.fast, "recipe.rank": args.rank},
+    )
+    with tracker:
+        tracker.save_reference(output / REFERENCE_FILENAME)
+        tracker.log_params(recipe)
+        tracker.log_artifact(recipe_path, artifact_path="recipe")
+        total_started = time.perf_counter()
+        try:
+            phase_started = time.perf_counter()
+            components, diffusion, struct_cls = _load_ptq_model(model_path)
+            timings["time.model_load_seconds"] = time.perf_counter() - phase_started
+            # This is the published INT4 GELU shift. It is later consumed by
+            # Nunchaku's fused GELU/MLP kernel, not left as a Python-side op.
+            shift_input_activations(diffusion)
+            model = struct_cls.construct(diffusion)
+            config = build_anima_svdquant_config(
+                args.dataset,
+                rank=args.rank,
+                num_samples=args.num_samples,
+                num_iters=args.num_iters,
+                fast=args.fast,
+            )
+            phase_started = time.perf_counter()
+            ptq(
+                model,
+                config,
+                cache=None,
+                load_dirpath=str(quant_dir) if args.resume else "",
+                save_dirpath=str(quant_dir),
+                copy_on_save=True,
+                save_model=True,
+                timings=timings,
+            )
+            timings["time.ptq.total_seconds"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
+            weights, manifest = export_nunchaku_checkpoint(
+                model,
+                quant_dir,
+                packed_dir,
+                rank=args.rank,
+            )
+            timings["time.pack_seconds"] = time.perf_counter() - phase_started
+            timings["artifact.checkpoint_bytes"] = weights.stat().st_size
+            timings["artifact.checkpoint_gib"] = weights.stat().st_size / 1024**3
+            tracker.log_artifact(manifest, artifact_path="checkpoint")
+        finally:
+            timings["time.total_seconds"] = time.perf_counter() - total_started
+            if components is not None:
+                components.close()
+            tools.logging.shutdown()
+            tracker.log_metrics(timings)
+            tracker.log_artifact(output / "ptq.log", artifact_path="logs")
+            tracker.log_artifact(output / REFERENCE_FILENAME, artifact_path="recipe")
+    result = {
+        "weights": str(weights),
+        "manifest": str(manifest),
+        "mlflow_run_id": tracker.run_id,
+        "timings": timings,
+    }
+    print(json.dumps(result, indent=2))
     return 0
 
 
@@ -244,69 +310,264 @@ def command_validate(args: SimpleNamespace) -> int:
         sample_latent,
         save_image,
     )
+    from .tracking import REFERENCE_FILENAME, ExperimentTracker, RunReference, find_run_reference
 
     output = Path(args.output).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
-    components = load_components(
-        _require_path(args.model, "Anima Aesthetic 1.1 model"),
-        _require_path(args.text_encoder, "Anima text encoder"),
-        _require_path(args.vae, "Qwen Image VAE"),
-        dtype=torch.bfloat16,
-    )
     prompts = load_prompts(args.prompts, args.num_prompts, args.prompt_offset)
+    checkpoint_manifest_path = Path(args.manifest).expanduser().resolve()
+    checkpoint_manifest = json.loads(checkpoint_manifest_path.read_text())
+    reference_path = find_run_reference(args.manifest, args.mlflow_reference)
+    run_reference = RunReference.load(reference_path) if reference_path is not None else None
+    run_id = args.mlflow_run_id or (run_reference.run_id if run_reference is not None else "")
+    tracking_uri = args.mlflow_uri or (run_reference.tracking_uri if run_reference is not None else "")
+    tracker = ExperimentTracker(
+        enabled=args.track,
+        tracking_uri=tracking_uri,
+        experiment_name=args.experiment_name,
+        run_name=args.run_name,
+        run_id=run_id,
+        tags={
+            "stage": "validated",
+            "validation.steps": args.steps,
+            "validation.resolution": f"{args.width}x{args.height}",
+            "validation.prompt_count": len(prompts),
+        },
+    )
+    validation_recipe = {
+        "manifest": str(Path(args.manifest).expanduser().resolve()),
+        "prompts": str(Path(args.prompts).expanduser().resolve()),
+        "num_prompts": len(prompts),
+        "prompt_offset": args.prompt_offset,
+        "width": args.width,
+        "height": args.height,
+        "steps": args.steps,
+        "cfg": args.cfg,
+        "sampler": args.sampler,
+        "scheduler": args.scheduler,
+        "acceptance_threshold": args.threshold,
+        "metric": "1 - raw_rgb_rmse",
+    }
+    validation_recipe_path = output / "validation-recipe.json"
+    validation_recipe_path.write_text(json.dumps(validation_recipe, indent=2) + "\n")
+    components = None
     references: dict[str, torch.Tensor] = {}
     results: list[dict] = []
-    try:
-        for name, prompt in prompts:
-            seed = hash_str_to_int(name)
-            latent = sample_latent(
-                components,
-                prompt,
-                seed=seed,
-                width=args.width,
-                height=args.height,
-                steps=args.steps,
-                cfg=args.cfg,
-                sampler=args.sampler,
-                scheduler=args.scheduler,
+    validation_started = time.perf_counter()
+    with tracker:
+        tracker.save_reference(output / REFERENCE_FILENAME)
+        if not run_id:
+            tracker.log_params(
+                {
+                    "base_model": checkpoint_manifest.get("base_model", "anima-aesthetic-v1.1"),
+                    "svd_rank": checkpoint_manifest.get("rank", ""),
+                    "weight_dtype": "sint4",
+                    "activation_dtype": "sint4",
+                    "group_size": checkpoint_manifest.get("group_size", ""),
+                    "low_rank_dtype": checkpoint_manifest.get("low_rank_dtype", ""),
+                    "runtime": "nunchaku",
+                    "checkpoint_manifest": str(checkpoint_manifest_path),
+                    "validation_only_import": True,
+                }
             )
-            pixels = decode_latent(components.vae, latent)
-            references[name] = pixels
-            save_image(pixels, output / "bf16" / f"{name}.png")
-        apply_nunchaku_checkpoint(components.diffusion_model, args.manifest)
-        model_management.load_models_gpu([components.model], force_full_load=True)
-        for name, prompt in prompts:
-            seed = hash_str_to_int(name)
-            latent = sample_latent(
-                components,
-                prompt,
-                seed=seed,
-                width=args.width,
-                height=args.height,
-                steps=args.steps,
-                cfg=args.cfg,
-                sampler=args.sampler,
-                scheduler=args.scheduler,
+        tracker.log_artifact(validation_recipe_path, artifact_path="validation")
+        try:
+            components = load_components(
+                _require_path(args.model, "Anima Aesthetic 1.1 model"),
+                _require_path(args.text_encoder, "Anima text encoder"),
+                _require_path(args.vae, "Qwen Image VAE"),
+                dtype=torch.bfloat16,
             )
-            pixels = decode_latent(components.vae, latent)
-            save_image(pixels, output / "int4" / f"{name}.png")
-            metrics = raw_pixel_similarity(references.pop(name), pixels)
-            results.append({"name": name, "prompt": prompt, **metrics})
-        similarities = [result["pixel_similarity"] for result in results]
-        report = {
-            "acceptance_threshold": args.threshold,
-            "accepted": bool(similarities) and min(similarities) >= args.threshold,
-            "mean_pixel_similarity": sum(similarities) / len(similarities),
-            "min_pixel_similarity": min(similarities),
-            "samples": results,
-        }
-        (output / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
-        print(json.dumps(report, indent=2))
-        return 0 if report["accepted"] else 2
-    finally:
-        references.clear()
-        components.close()
-        gc.collect()
+            phase_started = time.perf_counter()
+            for name, prompt in prompts:
+                seed = hash_str_to_int(name)
+                latent = sample_latent(
+                    components,
+                    prompt,
+                    seed=seed,
+                    width=args.width,
+                    height=args.height,
+                    steps=args.steps,
+                    cfg=args.cfg,
+                    sampler=args.sampler,
+                    scheduler=args.scheduler,
+                )
+                pixels = decode_latent(components.vae, latent)
+                references[name] = pixels
+                save_image(pixels, output / "bf16" / f"{name}.png")
+            bf16_seconds = time.perf_counter() - phase_started
+            apply_nunchaku_checkpoint(components.diffusion_model, args.manifest)
+            model_management.load_models_gpu([components.model], force_full_load=True)
+            phase_started = time.perf_counter()
+            for sample_index, (name, prompt) in enumerate(prompts):
+                seed = hash_str_to_int(name)
+                latent = sample_latent(
+                    components,
+                    prompt,
+                    seed=seed,
+                    width=args.width,
+                    height=args.height,
+                    steps=args.steps,
+                    cfg=args.cfg,
+                    sampler=args.sampler,
+                    scheduler=args.scheduler,
+                )
+                pixels = decode_latent(components.vae, latent)
+                save_image(pixels, output / "int4" / f"{name}.png")
+                metrics = raw_pixel_similarity(references.pop(name), pixels)
+                results.append({"name": name, "prompt": prompt, **metrics})
+                tracker.log_metrics(
+                    {f"quality.sample.{key}": value for key, value in metrics.items()},
+                    step=sample_index,
+                )
+            int4_seconds = time.perf_counter() - phase_started
+            similarities = [result["pixel_similarity"] for result in results]
+            rmses = [result["rmse"] for result in results]
+            maes = [result["mae"] for result in results]
+            max_errors = [result["max_abs_error"] for result in results]
+            accepted_samples = sum(similarity >= args.threshold for similarity in similarities)
+            report = {
+                "acceptance_threshold": args.threshold,
+                "accepted": bool(similarities) and min(similarities) >= args.threshold,
+                "acceptance_rate": accepted_samples / len(similarities),
+                "mean_pixel_similarity": sum(similarities) / len(similarities),
+                "min_pixel_similarity": min(similarities),
+                "mean_rmse": sum(rmses) / len(rmses),
+                "mean_mae": sum(maes) / len(maes),
+                "max_abs_error": max(max_errors),
+                "target_gap": max(0.0, args.threshold - min(similarities)),
+                "bf16_seconds": bf16_seconds,
+                "int4_seconds": int4_seconds,
+                "samples": results,
+            }
+            metrics_path = output / "metrics.json"
+            metrics_path.write_text(json.dumps(report, indent=2) + "\n")
+            tracker.log_metrics(
+                {
+                    "quality.pixel_similarity.mean": report["mean_pixel_similarity"],
+                    "quality.pixel_similarity.min": report["min_pixel_similarity"],
+                    "quality.rmse.mean": report["mean_rmse"],
+                    "quality.mae.mean": report["mean_mae"],
+                    "quality.max_abs_error": report["max_abs_error"],
+                    "quality.acceptance_threshold": args.threshold,
+                    "quality.acceptance_rate": report["acceptance_rate"],
+                    "quality.accepted": int(report["accepted"]),
+                    "quality.target_gap": report["target_gap"],
+                    "time.validation.bf16_seconds": bf16_seconds,
+                    "time.validation.int4_seconds": int4_seconds,
+                    "time.validation.total_seconds": time.perf_counter() - validation_started,
+                    "performance.image.int4_vs_bf16_speedup": bf16_seconds / int4_seconds,
+                }
+            )
+            tracker.log_artifact(metrics_path, artifact_path="validation")
+            tracker.log_artifacts(output / "bf16", artifact_path="validation/bf16")
+            tracker.log_artifacts(output / "int4", artifact_path="validation/int4")
+            tracker.log_artifact(output / REFERENCE_FILENAME, artifact_path="validation")
+            print(json.dumps({**report, "mlflow_run_id": tracker.run_id}, indent=2))
+            return 0 if report["accepted"] else 2
+        finally:
+            references.clear()
+            if components is not None:
+                components.close()
+            gc.collect()
+
+
+def command_benchmark(args: SimpleNamespace) -> int:
+    import torch
+    from comfy import model_management
+    from datasets import load_from_disk
+
+    from .nunchaku import apply_nunchaku_checkpoint
+    from .tracking import REFERENCE_FILENAME, ExperimentTracker, RunReference, find_run_reference
+
+    def move_to_device(value, device: torch.device):
+        if isinstance(value, torch.Tensor):
+            return value.to(device=device)
+        if isinstance(value, list):
+            return [move_to_device(item, device) for item in value]
+        if isinstance(value, tuple):
+            return tuple(move_to_device(item, device) for item in value)
+        if isinstance(value, dict):
+            return {key: move_to_device(item, device) for key, item in value.items()}
+        return value
+
+    dataset_path = Path(args.dataset).expanduser().resolve()
+    dataset = load_from_disk(str(dataset_path))
+    rows = [row for row in dataset if row.get("selected_for_calibration")][: args.num_samples]
+    if not rows:
+        raise ValueError(f"No selected calibration records in {dataset_path}")
+    output = Path(args.output).expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    reference_path = find_run_reference(args.manifest, args.mlflow_reference)
+    run_reference = RunReference.load(reference_path) if reference_path is not None else None
+    run_id = args.mlflow_run_id or (run_reference.run_id if run_reference is not None else "")
+    tracking_uri = args.mlflow_uri or (run_reference.tracking_uri if run_reference is not None else "")
+    tracker = ExperimentTracker(
+        enabled=args.track,
+        tracking_uri=tracking_uri,
+        experiment_name=args.experiment_name,
+        run_name=args.run_name,
+        run_id=run_id,
+        tags={"stage": "benchmarked", "benchmark": "denoiser-forward"},
+    )
+    components = None
+    with tracker:
+        tracker.save_reference(output / REFERENCE_FILENAME)
+        components, diffusion, _ = _load_ptq_model(_require_path(args.model, "Anima Aesthetic 1.1 model"))
+        device = next(diffusion.parameters()).device
+        caches = []
+        for row in rows:
+            cache_path = Path(row["cache_path"])
+            if not cache_path.is_absolute():
+                cache_path = dataset_path.parent / cache_path
+            caches.append(move_to_device(torch.load(cache_path, weights_only=True), device))
+
+        def measure() -> float:
+            with torch.inference_mode():
+                for _ in range(args.warmup):
+                    for cache in caches:
+                        result = diffusion(*cache["input_args"], **cache["input_kwargs"])
+                        del result
+                torch.cuda.synchronize(device)
+                started = time.perf_counter()
+                for _ in range(args.iterations):
+                    for cache in caches:
+                        result = diffusion(*cache["input_args"], **cache["input_kwargs"])
+                        del result
+                torch.cuda.synchronize(device)
+            return (time.perf_counter() - started) / (args.iterations * len(caches))
+
+        try:
+            bf16_seconds = measure()
+            apply_nunchaku_checkpoint(diffusion, args.manifest)
+            model_management.load_models_gpu([components.model], force_full_load=True)
+            int4_seconds = measure()
+            report = {
+                "num_timestep_records": len(caches),
+                "warmup_rounds": args.warmup,
+                "measured_rounds": args.iterations,
+                "bf16_milliseconds_per_denoiser": bf16_seconds * 1000,
+                "int4_milliseconds_per_denoiser": int4_seconds * 1000,
+                "int4_vs_bf16_speedup": bf16_seconds / int4_seconds,
+            }
+            report_path = output / "denoiser-benchmark.json"
+            report_path.write_text(json.dumps(report, indent=2) + "\n")
+            tracker.log_metrics(
+                {
+                    "performance.denoiser.bf16_milliseconds": bf16_seconds * 1000,
+                    "performance.denoiser.int4_milliseconds": int4_seconds * 1000,
+                    "performance.denoiser.int4_vs_bf16_speedup": bf16_seconds / int4_seconds,
+                    "performance.denoiser.timestep_records": len(caches),
+                    "performance.denoiser.iterations": args.iterations,
+                }
+            )
+            tracker.log_artifact(report_path, artifact_path="benchmark")
+            print(json.dumps({**report, "mlflow_run_id": tracker.run_id}, indent=2))
+        finally:
+            caches.clear()
+            if components is not None:
+                components.close()
+    return 0
 
 
 def _invoke(command, gpu: int, **kwargs) -> None:
@@ -357,18 +618,22 @@ def quantize_cli(
     dataset: str = typer.Option(str(OUTPUT_DEFAULT / "dataset/hf_dataset")),
     num_samples: int = typer.Option(100, min=1),
     rank: int = typer.Option(32, help="BF16 SVD branch rank; supported values are 32 and 128."),
-    num_iters: int = typer.Option(100, min=1),
+    num_iters: int = typer.Option(1, min=1, help="Iterative residual-SVD passes."),
     output: str = typer.Option(str(OUTPUT_DEFAULT / "rank32")),
     fast: bool = typer.Option(
         False,
         "--fast",
-        help="Use one smoothing candidate and one randomized residual SVD integration pass.",
+        help="Use one smoothing candidate and randomized truncated SVD passes.",
     ),
     resume: bool = typer.Option(
         False,
         "--resume",
         help="Reuse completed caches already present in the output directory.",
     ),
+    track: bool = typer.Option(True, "--track/--no-track", help="Record the recipe and timings in MLflow."),
+    mlflow_uri: str = typer.Option(MLFLOW_URI_DEFAULT, help="AppMana MLflow tracking server."),
+    experiment_name: str = typer.Option(MLFLOW_EXPERIMENT_DEFAULT, help="MLflow experiment name."),
+    run_name: str = typer.Option("", help="Optional human-readable MLflow run name."),
 ) -> None:
     _invoke(
         command_quantize,
@@ -381,6 +646,10 @@ def quantize_cli(
         output=output,
         fast=fast,
         resume=resume,
+        track=track,
+        mlflow_uri=mlflow_uri,
+        experiment_name=experiment_name,
+        run_name=run_name,
     )
 
 
@@ -420,6 +689,12 @@ def validate_cli(
     sampler: str = typer.Option("er_sde"),
     scheduler: str = typer.Option("simple"),
     threshold: float = typer.Option(0.99, min=0.0, max=1.0),
+    track: bool = typer.Option(True, "--track/--no-track", help="Record raw-pixel results and images in MLflow."),
+    mlflow_uri: str = typer.Option(MLFLOW_URI_DEFAULT, help="AppMana MLflow tracking server."),
+    experiment_name: str = typer.Option(MLFLOW_EXPERIMENT_DEFAULT, help="MLflow experiment name."),
+    run_name: str = typer.Option("", help="Run name when validation creates a new MLflow run."),
+    mlflow_run_id: str = typer.Option("", help="Explicit MLflow run to resume."),
+    mlflow_reference: str = typer.Option("", help="Explicit path to mlflow-run.json."),
 ) -> None:
     _invoke(
         command_validate,
@@ -439,7 +714,92 @@ def validate_cli(
         sampler=sampler,
         scheduler=scheduler,
         threshold=threshold,
+        track=track,
+        mlflow_uri=mlflow_uri,
+        experiment_name=experiment_name,
+        run_name=run_name,
+        mlflow_run_id=mlflow_run_id,
+        mlflow_reference=mlflow_reference,
     )
+
+
+@app.command("benchmark", help="Measure steady-state BF16 versus Nunchaku INT4 denoiser forwards.")
+def benchmark_cli(
+    manifest: str = typer.Option(..., help="Nunchaku checkpoint JSON manifest."),
+    dataset: str = typer.Option(str(OUTPUT_DEFAULT / "dataset/hf_dataset")),
+    model: str = typer.Option(MODEL_DEFAULT, help="Anima Aesthetic 1.1 safetensors."),
+    gpu: int = typer.Option(0),
+    num_samples: int = typer.Option(8, min=1, help="Distinct cached timestep records."),
+    warmup: int = typer.Option(2, min=0),
+    iterations: int = typer.Option(10, min=1),
+    output: str = typer.Option(str(OUTPUT_DEFAULT / "benchmark")),
+    track: bool = typer.Option(True, "--track/--no-track"),
+    mlflow_uri: str = typer.Option(MLFLOW_URI_DEFAULT),
+    experiment_name: str = typer.Option(MLFLOW_EXPERIMENT_DEFAULT),
+    run_name: str = typer.Option(""),
+    mlflow_run_id: str = typer.Option(""),
+    mlflow_reference: str = typer.Option(""),
+) -> None:
+    _invoke(
+        command_benchmark,
+        gpu,
+        manifest=manifest,
+        dataset=dataset,
+        model=model,
+        num_samples=num_samples,
+        warmup=warmup,
+        iterations=iterations,
+        output=output,
+        track=track,
+        mlflow_uri=mlflow_uri,
+        experiment_name=experiment_name,
+        run_name=run_name,
+        mlflow_run_id=mlflow_run_id,
+        mlflow_reference=mlflow_reference,
+    )
+
+
+@app.command("compare", help="List SVDQuant recipes by raw-pixel fidelity from AppMana MLflow.")
+def compare_cli(
+    mlflow_uri: str = typer.Option(MLFLOW_URI_DEFAULT, help="AppMana MLflow tracking server."),
+    experiment_name: str = typer.Option(MLFLOW_EXPERIMENT_DEFAULT, help="MLflow experiment name."),
+    limit: int = typer.Option(25, min=1, max=1000),
+) -> None:
+    import mlflow
+
+    mlflow.set_tracking_uri(mlflow_uri)
+    experiment = mlflow.get_experiment_by_name(experiment_name)
+    if experiment is None:
+        raise typer.BadParameter(f"MLflow experiment does not exist: {experiment_name}")
+    runs = mlflow.search_runs(
+        experiment_ids=[experiment.experiment_id],
+        max_results=limit,
+        output_format="list",
+    )
+    rows = []
+    for run in runs:
+        rows.append(
+            {
+                "run_id": run.info.run_id,
+                "run_name": run.data.tags.get("mlflow.runName", ""),
+                "status": run.info.status,
+                "rank": run.data.params.get("svd_rank", ""),
+                "svd_mode": run.data.params.get("svd_mode", ""),
+                "num_samples": run.data.params.get("num_samples", ""),
+                "min_pixel_similarity": run.data.metrics.get("quality.pixel_similarity.min"),
+                "mean_pixel_similarity": run.data.metrics.get("quality.pixel_similarity.mean"),
+                "target_gap": run.data.metrics.get("quality.target_gap"),
+                "total_seconds": run.data.metrics.get("time.total_seconds"),
+                "low_rank_seconds": run.data.metrics.get("time.ptq.low_rank_seconds"),
+                "denoiser_speedup": run.data.metrics.get("performance.denoiser.int4_vs_bf16_speedup"),
+                "image_speedup": run.data.metrics.get("performance.image.int4_vs_bf16_speedup"),
+            }
+        )
+    rows.sort(
+        key=lambda row: row["min_pixel_similarity"] if row["min_pixel_similarity"] is not None else -1.0,
+        reverse=True,
+    )
+    typer.echo(json.dumps({"experiment": experiment_name, "runs": rows}, indent=2))
 
 
 def main() -> None:

@@ -2,6 +2,7 @@ import gc
 import json
 import os
 import pprint
+import time
 import traceback
 
 import torch
@@ -32,6 +33,7 @@ def ptq(  # noqa: C901
     save_dirpath: str = "",
     copy_on_save: bool = False,
     save_model: bool = False,
+    timings: dict[str, float] | None = None,
 ) -> DiffusionModelStruct:
     """Post-training quantization of a diffusion model.
 
@@ -50,12 +52,15 @@ def ptq(  # noqa: C901
             Whether to copy the cache to the save directory.
         save_model (`bool`, *optional*, defaults to `False`):
             Whether to save the quantized model checkpoint.
+        timings (`dict[str, float]`, *optional*, defaults to `None`):
+            Mutable mapping populated with wall-clock phase durations.
 
     Returns:
         `DiffusionModelStruct`:
             The quantized diffusion model.
     """
     logger = tools.logging.getLogger(__name__)
+    timings = timings if timings is not None else {}
     if not isinstance(model, DiffusionModelStruct):
         model = DiffusionModelStruct.construct(model)
     assert isinstance(model, DiffusionModelStruct)
@@ -104,15 +109,18 @@ def ptq(  # noqa: C901
         save_model = False
 
     if quant and config.enabled_rotation:
+        phase_started = time.perf_counter()
         logger.info("* Rotating model for quantization")
         tools.logging.Formatter.indent_inc()
         rotate_diffusion(model, config=config)
         tools.logging.Formatter.indent_dec()
         gc.collect()
         torch.cuda.empty_cache()
+        timings["time.ptq.rotation_seconds"] = time.perf_counter() - phase_started
 
     # region smooth quantization
     if quant and config.enabled_smooth:
+        phase_started = time.perf_counter()
         logger.info("* Smoothing model for quantization")
         tools.logging.Formatter.indent_inc()
         load_from = ""
@@ -143,6 +151,7 @@ def ptq(  # noqa: C901
         tools.logging.Formatter.indent_dec()
         gc.collect()
         torch.cuda.empty_cache()
+        timings["time.ptq.smoothing_seconds"] = time.perf_counter() - phase_started
     # endregion
     # region collect original state dict
     if config.needs_acts_quantizer_cache:
@@ -168,6 +177,7 @@ def ptq(  # noqa: C901
         gc.collect()
         torch.cuda.empty_cache()
     elif quant_wgts:
+        phase_started = time.perf_counter()
         logger.info("* Quantizing weights")
         tools.logging.Formatter.indent_inc()
         quantizer_state_dict, quantizer_load_from = None, ""
@@ -196,6 +206,7 @@ def ptq(  # noqa: C901
             quantizer_state_dict=quantizer_state_dict,
             branch_state_dict=branch_state_dict,
             return_with_scale_state_dict=bool(save_dirpath),
+            timings=timings,
         )
         if not quantizer_load_from and cache and cache.dirpath.wgts:
             logger.info(f"- Saving weight settings to {cache.path.wgts}")
@@ -228,7 +239,9 @@ def ptq(  # noqa: C901
         tools.logging.Formatter.indent_dec()
         gc.collect()
         torch.cuda.empty_cache()
+        timings["time.ptq.weights_seconds"] = time.perf_counter() - phase_started
     if quant_acts:
+        phase_started = time.perf_counter()
         logger.info("  * Quantizing activations")
         tools.logging.Formatter.indent_inc()
         if config.needs_acts_quantizer_cache:
@@ -266,6 +279,7 @@ def ptq(  # noqa: C901
         del orig_state_dict
         gc.collect()
         torch.cuda.empty_cache()
+        timings["time.ptq.activations_seconds"] = time.perf_counter() - phase_started
     return model
 
 

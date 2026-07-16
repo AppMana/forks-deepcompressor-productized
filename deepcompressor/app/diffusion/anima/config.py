@@ -61,9 +61,10 @@ def build_anima_svdquant_config(
         sample_batch_size=sample_batch_size,
         sample_size=-1,
         outputs_device="cpu",
-        # One residual SVD is enough to prove the complete PTQ/export path.
-        # The production recipe retains the paper's iterative refinement.
-        num_iters=1 if fast else num_iters,
+        # The randomized pilot keeps the same iterative residual objective as
+        # the exact recipe; only the truncated-SVD solver and smoothing search
+        # are cheaper. This makes 1/2/4/... iteration sweeps meaningful.
+        num_iters=num_iters,
         svd_mode="randomized" if fast else "exact",
         svd_oversample=8,
         svd_niter=2,

@@ -178,14 +178,14 @@ def quantize_diffusion_block_activations(  # noqa: C901
                     orig_weights=orig_wgts,
                 )
                 quantizer_state_dict[cache_keys[0]] = quantizer.state_dict()
-                gc.collect()
-                torch.cuda.empty_cache()
             else:
                 quantizer.load_state_dict(quantizer_state_dict[cache_keys[0]], device=modules[0].weight.device)
             for cache_key in cache_keys:
                 quantizers[cache_key] = quantizer
         del quantizer
     tools.logging.Formatter.indent_dec()
+    gc.collect()
+    torch.cuda.empty_cache()
     return quantizers
 
 

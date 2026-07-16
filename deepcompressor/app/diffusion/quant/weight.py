@@ -2,6 +2,7 @@
 """Diffusion model weight quantization calibration module."""
 
 import gc
+import time
 import typing as tp
 
 import torch
@@ -115,8 +116,6 @@ def calibrate_diffusion_block_low_rank_branch(  # noqa: C901
                     eval_kwargs=eval_kwargs,
                 ).state_dict()
                 tools.logging.Formatter.indent_dec()
-                gc.collect()
-                torch.cuda.empty_cache()
             shared_branch = LowRankBranch(
                 in_features=module.weight.shape[1],
                 out_features=sum(m.weight.shape[0] for m in modules),
@@ -143,8 +142,11 @@ def calibrate_diffusion_block_low_rank_branch(  # noqa: C901
                 module.weight.data.sub_(shared_branch.get_effective_weight().view(module.weight.data.shape))
                 shared_branch.as_hook().register(module)
             del shared_branch
-            gc.collect()
-            torch.cuda.empty_cache()
+    # Python refcounting releases per-projection temporaries immediately.
+    # Emptying the CUDA allocator after every projection forced a device-wide
+    # synchronization; retain the safety boundary once per diffusion block.
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @torch.inference_mode()
@@ -202,8 +204,6 @@ def update_diffusion_block_weight_quantizer_state_dict(
                     eval_kwargs=eval_kwargs,
                 )
                 quantizer_state_dict[module_name] = quantizer.state_dict()
-                gc.collect()
-                torch.cuda.empty_cache()
             else:
                 logger.debug("- Loading %s.weight quantizer", module_name)
         else:
@@ -211,6 +211,8 @@ def update_diffusion_block_weight_quantizer_state_dict(
             if module_name in quantizer_state_dict:
                 quantizer_state_dict.pop(module_name)
     tools.logging.Formatter.indent_dec()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 @torch.inference_mode()
@@ -286,9 +288,9 @@ def quantize_diffusion_block_weights(
                 else:
                     scale_state_dict[f"{param_name}.{zero_name}"] = result.zero
             del result
-            gc.collect()
-            torch.cuda.empty_cache()
     tools.logging.Formatter.indent_dec()
+    gc.collect()
+    torch.cuda.empty_cache()
     return scale_state_dict
 
 
@@ -299,6 +301,7 @@ def quantize_diffusion_weights(
     quantizer_state_dict: dict[str, dict[str, torch.Tensor | float | None]] | None = None,
     branch_state_dict: dict[str, dict[str, torch.Tensor]] | None = None,
     return_with_scale_state_dict: bool = False,
+    timings: dict[str, float] | None = None,
 ) -> tuple[
     dict[str, dict[str, torch.Tensor | float | None]],
     dict[str, dict[str, torch.Tensor]],
@@ -317,6 +320,8 @@ def quantize_diffusion_weights(
             The state dict of the low-rank branches.
         return_with_scale_state_dict (`bool`, *optional*, defaults to `False`):
             Whether to return the scale state dict.
+        timings (`dict[str, float]`, *optional*, defaults to `None`):
+            Mutable mapping populated with wall-clock phase durations.
 
     Returns:
         `tuple[
@@ -332,7 +337,9 @@ def quantize_diffusion_weights(
     assert isinstance(model, DiffusionModelStruct)
     quantizer_state_dict = quantizer_state_dict or {}
     branch_state_dict = branch_state_dict or {}
+    timings = timings if timings is not None else {}
 
+    phase_started = time.perf_counter()
     if config.wgts.enabled_low_rank and (not config.wgts.low_rank.compensate or config.wgts.low_rank.num_iters > 1):
         logger.info("* Adding low-rank branches to weights")
         tools.logging.Formatter.indent_inc()
@@ -368,10 +375,12 @@ def quantize_diffusion_weights(
                         layer_kwargs=layer_kwargs,
                     )
         tools.logging.Formatter.indent_dec()
+    timings["time.ptq.low_rank_seconds"] = time.perf_counter() - phase_started
 
     skip_pre_modules = all(key in config.wgts.skips for key in model.get_prev_module_keys())
     skip_post_modules = all(key in config.wgts.skips for key in model.get_post_module_keys())
     with tools.logging.redirect_tqdm():
+        phase_started = time.perf_counter()
         if not quantizer_state_dict:
             if config.wgts.needs_calib_data:
                 iterable = config.calib.build_loader().iter_layer_activations(
@@ -401,7 +410,9 @@ def quantize_diffusion_weights(
                     layer_cache=layer_cache,
                     layer_kwargs=layer_kwargs,
                 )
+        timings["time.ptq.weight_calibration_seconds"] = time.perf_counter() - phase_started
     scale_state_dict: dict[str, torch.Tensor | float | None] = {}
+    phase_started = time.perf_counter()
     if config.wgts.enabled_gptq:
         iterable = config.calib.build_loader().iter_layer_activations(
             model,
@@ -429,6 +440,7 @@ def quantize_diffusion_weights(
             return_with_scale_state_dict=return_with_scale_state_dict,
         )
         scale_state_dict.update(layer_scale_state_dict)
+    timings["time.ptq.weight_materialization_seconds"] = time.perf_counter() - phase_started
     return quantizer_state_dict, branch_state_dict, scale_state_dict
 
 

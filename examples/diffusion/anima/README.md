@@ -70,6 +70,7 @@ deepcompressor-svdquant quantize \
   --dataset runs/anima-aesthetic-v1.1/dataset/hf_dataset \
   --num-samples 1 \
   --rank 32 \
+  --num-iters 1 \
   --fast \
   --resume \
   --output runs/anima-aesthetic-v1.1/smoke-rank32
@@ -87,6 +88,29 @@ deepcompressor-svdquant quantize \
   --output runs/anima-aesthetic-v1.1/rank32
 ```
 
+For a controlled randomized-SVD ladder, hold rank and validation prompts
+fixed while changing calibration coverage and residual passes:
+
+```bash
+# Calibration coverage control
+deepcompressor-svdquant quantize \
+  --dataset runs/anima-aesthetic-v1.1/calibration-100prompts/hf_dataset \
+  --num-samples 100 --rank 128 --num-iters 1 --fast \
+  --run-name rank128-randomized-1iter-100prompts \
+  --output runs/anima-aesthetic-v1.1/rank128-randomized-1iter-100prompts
+
+# Residual-refinement experiment
+deepcompressor-svdquant quantize \
+  --dataset runs/anima-aesthetic-v1.1/calibration-100prompts/hf_dataset \
+  --num-samples 100 --rank 128 --num-iters 4 --fast \
+  --run-name rank128-randomized-4iter-100prompts \
+  --output runs/anima-aesthetic-v1.1/rank128-randomized-4iter-100prompts
+```
+
+`--fast` selects manual one-candidate smoothing and randomized truncated SVD;
+it does not override `--num-iters`. Early stopping can still accept fewer
+residual passes when another pass does not reduce the module-output objective.
+
 The PTQ of one checkpoint is intentionally single-process today. Blocks are
 consumed in order because DeepCompressor propagates the effective output of a
 processed block into the next block's cache. Ordinary Accelerate data
@@ -103,15 +127,109 @@ oversampling vectors and two power iterations; it proves integration quickly
 but is not the production checkpoint recipe. `--resume` reuses a completed
 smoothing cache after an interrupted run.
 
+## AppMana MLflow tracking
+
+Quantization and validation track to the deployed
+`https://mlflow.appmana.com` server by default, in the
+`anima-aesthetic-v1.1-svdquant` experiment. The quantization run records the
+complete recipe, GPU/software versions, per-phase wall times, and packed
+checkpoint size. The large checkpoint stays on the shared filesystem; MLflow
+receives its manifest, recipe, and log. Validation automatically discovers
+`mlflow-run.json` beside the checkpoint and resumes the same run, adding raw
+pixel metrics and the paired BF16/INT4 PNG artifacts.
+
+The cluster's existing `mlflow-auth-admin-secret` supplies HTTP Basic auth.
+Use the same secret references in a Kueue JobSet container:
+
+```yaml
+env:
+  - name: MLFLOW_TRACKING_URI
+    value: https://mlflow.appmana.com
+  - name: MLFLOW_TRACKING_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: mlflow-auth-admin-secret
+        key: username
+  - name: MLFLOW_TRACKING_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: mlflow-auth-admin-secret
+        key: password
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: mlflow-s3-user
+        key: ACCESS_KEY_ID
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: mlflow-s3-user
+        key: ACCESS_SECRET_KEY
+  - name: MLFLOW_S3_ENDPOINT_URL
+    value: http://seaweedfs-s3.seaweedfs.svc.cluster.local:8333
+```
+
+For an authenticated invocation from a workstation with cluster access:
+
+```bash
+export MLFLOW_TRACKING_USERNAME="$(kubectl get secret mlflow-auth-admin-secret \
+  -n appmana -o jsonpath='{.data.username}' | base64 --decode)"
+export MLFLOW_TRACKING_PASSWORD="$(kubectl get secret mlflow-auth-admin-secret \
+  -n appmana -o jsonpath='{.data.password}' | base64 --decode)"
+export AWS_ACCESS_KEY_ID="$(kubectl get secret mlflow-s3-user \
+  -n appmana -o jsonpath='{.data.ACCESS_KEY_ID}' | base64 --decode)"
+export AWS_SECRET_ACCESS_KEY="$(kubectl get secret mlflow-s3-user \
+  -n appmana -o jsonpath='{.data.ACCESS_SECRET_KEY}' | base64 --decode)"
+export MLFLOW_S3_ENDPOINT_URL=https://s3-lfs.appmana.com
+```
+
+List tracked recipes in descending minimum-pixel-similarity order:
+
+```bash
+deepcompressor-svdquant compare
+```
+
+Use `--no-track` for an intentionally offline smoke test. No credential is
+ever written to a run directory or MLflow artifact.
+
 ## Pixel validation
 
 ```bash
 deepcompressor-svdquant validate \
   --gpu 0 \
-  --manifest runs/anima-aesthetic-v1.1/rank32/nunchaku/manifest.json \
+  --manifest runs/anima-aesthetic-v1.1/rank32/nunchaku/anima-aesthetic-v1.1-svdquant-int4.json \
   --num-prompts 100 \
   --threshold 0.99 \
   --output runs/anima-aesthetic-v1.1/rank32/validation
 ```
 
 The command exits with status 2 if any prompt misses the threshold.
+
+Use prompts outside the calibration range for acceptance. For example, if
+prompts 0--99 supplied PTQ, validate on 100--199:
+
+```bash
+deepcompressor-svdquant validate \
+  --manifest runs/anima-aesthetic-v1.1/rank128/nunchaku/anima-aesthetic-v1.1-svdquant-int4.json \
+  --prompt-offset 100 --num-prompts 100 --steps 30 --threshold 0.99 \
+  --output runs/anima-aesthetic-v1.1/rank128/validation-held-out
+```
+
+## Performance validation
+
+Image-level timing includes text encoding, sampler orchestration, VAE decode,
+and file I/O shared by BF16 and INT4. Measure the denoiser separately with
+cached timestep records to determine whether the fused projection path is
+actually fast:
+
+```bash
+deepcompressor-svdquant benchmark \
+  --manifest runs/anima-aesthetic-v1.1/rank128/nunchaku/anima-aesthetic-v1.1-svdquant-int4.json \
+  --dataset runs/anima-aesthetic-v1.1/calibration-100prompts/hf_dataset \
+  --num-samples 16 --warmup 2 --iterations 10 \
+  --output runs/anima-aesthetic-v1.1/rank128/benchmark
+```
+
+MLflow records `performance.denoiser.int4_vs_bf16_speedup` independently from
+`performance.image.int4_vs_bf16_speedup`. A lower result is a performance
+failure to profile; it is not hidden by reporting only linear-kernel timings.
