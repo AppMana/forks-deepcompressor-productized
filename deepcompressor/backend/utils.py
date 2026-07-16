@@ -48,7 +48,7 @@ def pad(
         for d, div in zip(dim, divisor, strict=True):
             shape[d] = ceil_divide(shape[d], div) * div
     result = torch.full(shape, fill_value, dtype=tensor.dtype, device=tensor.device)
-    result[[slice(0, extent) for extent in tensor.shape]] = tensor
+    result[tuple(slice(0, extent) for extent in tensor.shape)] = tensor
     return result
 
 

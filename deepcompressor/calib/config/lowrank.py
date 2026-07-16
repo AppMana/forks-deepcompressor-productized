@@ -47,8 +47,17 @@ class QuantLowRankCalibConfig(SearchBasedCalibConfig, QuantLowRankConfig):
     pre_reshape: bool = field(init=False, default=True)
     num_iters: int = 1
     early_stop: bool = False
+    svd_mode: str = "exact"
+    svd_oversample: int = 8
+    svd_niter: int = 2
 
     def __post_init__(self):
+        if self.svd_mode not in {"exact", "randomized"}:
+            raise ValueError(f"Unsupported SVD mode: {self.svd_mode}")
+        if self.svd_oversample < 0:
+            raise ValueError("SVD oversampling must be non-negative")
+        if self.svd_niter < 0:
+            raise ValueError("SVD power iterations must be non-negative")
         if self.strategy != SearchBasedCalibStrategy.Manual:
             self.strategy = SearchBasedCalibStrategy.GridSearch
         if self.compensate and self.num_iters <= 1:
@@ -69,6 +78,8 @@ class QuantLowRankCalibConfig(SearchBasedCalibConfig, QuantLowRankConfig):
             name += ".compensate"
         if self.early_stop and self.num_iters > 1:
             name += ".earlystop"
+        if self.svd_mode != "exact":
+            name += f".{self.svd_mode}.o{self.svd_oversample}.p{self.svd_niter}"
         names.append(name)
         if prefix:
             names = [f"{prefix}.{name}" for name in names]

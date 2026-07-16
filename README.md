@@ -46,6 +46,9 @@ DeepCompressor also contains examples that integrate with other inference librar
 
 ## Installation
 
+The AppMana fork's native ComfyUI Anima Aesthetic 1.1 workflow is documented
+in [examples/diffusion/anima/README.md](examples/diffusion/anima/README.md).
+
 ### Install from Source
 
 1. Clone this repository and navigate to deepcompressor folder
@@ -198,4 +201,4 @@ You are also welcome to check out [MIT HAN Lab](https://hanlab.mit.edu) for othe
 
 ## Acknowledgments
 
-DeepCompressor is inspired by many open-source libraries, including (but not limited to) [GPTQ](https://arxiv.org/abs/2210.17323), [QuaRot](https://arxiv.org/abs/2404.00456) and [Atom](https://arxiv.org/abs/2310.19102). 
+DeepCompressor is inspired by many open-source libraries, including (but not limited to) [GPTQ](https://arxiv.org/abs/2210.17323), [QuaRot](https://arxiv.org/abs/2404.00456) and [Atom](https://arxiv.org/abs/2310.19102).

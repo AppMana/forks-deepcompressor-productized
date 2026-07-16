@@ -11,13 +11,24 @@ __all__ = ["LowRankBranch"]
 
 class LowRankBranch(nn.Module):
     def __init__(
-        self, in_features: int, out_features: int, rank: int, alpha: float = 1.0, weight: torch.Tensor | None = None
+        self,
+        in_features: int,
+        out_features: int,
+        rank: int,
+        alpha: float = 1.0,
+        weight: torch.Tensor | None = None,
+        svd_mode: str = "exact",
+        svd_oversample: int = 8,
+        svd_niter: int = 2,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.rank = rank
         self.alpha = alpha
+        self.svd_mode = svd_mode
+        self.svd_oversample = svd_oversample
+        self.svd_niter = svd_niter
         if rank == 0:
             self.a, self.b = None, None
         elif rank < 0:
@@ -46,7 +57,20 @@ class LowRankBranch(nn.Module):
         if self.rank < 0:
             self.a.weight.data.copy_(weight)
         elif self.rank > 0:
-            u, s, vh = torch.linalg.svd(weight.double())
+            if self.svd_mode == "exact":
+                # Only the leading ``rank`` singular vectors are consumed.
+                # Economy SVD is exact for them and avoids unused square
+                # matrices for tall and wide diffusion projections.
+                u, s, vh = torch.linalg.svd(weight.double(), full_matrices=False)
+            elif self.svd_mode == "randomized":
+                q = min(min(weight.shape), self.rank + self.svd_oversample)
+                devices = [weight.device.index] if weight.is_cuda else []
+                with torch.random.fork_rng(devices=devices):
+                    torch.manual_seed(0)
+                    u, s, v = torch.svd_lowrank(weight.double(), q=q, niter=self.svd_niter)
+                vh = v.mH
+            else:
+                raise ValueError(f"Unsupported SVD mode: {self.svd_mode}")
             # tensor: [oc, ic], u: [oc, oc], s: [oc], vh: [ic, ic]
             # us: [oc, rank], vh: [rank, ic]
             us = u[:, : self.rank] * s[: self.rank]
@@ -69,20 +93,19 @@ class LowRankBranch(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor | None:
         if self.a is None:
             return None
-        else:
-            if input.ndim <= 3:
-                return self.alpha * self.b(self.a(input))
-            else:
-                assert input.ndim == 4
-                assert input.shape[-1] != self.in_features
-                assert input.shape[1] == self.in_features
-                # [B, C, H, W] -> [B, H, W, C] -> [B, H * W, C]
-                B, C, H, W = input.shape
-                input = input.permute(0, 2, 3, 1).reshape(B, H * W, C)
-                output = self.alpha * self.b(self.a(input))
-                # [B, H * W, C] -> [B, H, W, C] -> [B, C, H, W]
-                output = output.reshape(B, H, W, -1).permute(0, 3, 1, 2)
-                return output
+        if input.shape[-1] == self.in_features:
+            # nn.Linear natively preserves any number of leading dimensions.
+            # This includes Anima's [B, T, H, W, C] MLP activations.
+            return self.alpha * self.b(self.a(input))
+        if input.ndim >= 3 and input.shape[1] == self.in_features:
+            # Channel-first convolution activations: [B, C, ...] ->
+            # [B, ..., C], apply the linear branch, then restore C to dim 1.
+            input = input.movedim(1, -1)
+            return (self.alpha * self.b(self.a(input))).movedim(-1, 1)
+        raise ValueError(
+            f"Low-rank branch expected {self.in_features} input channels in the last or second dimension, "
+            f"got shape {tuple(input.shape)}"
+        )
 
     def as_hook(
         self,

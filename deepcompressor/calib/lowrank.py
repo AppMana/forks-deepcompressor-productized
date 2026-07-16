@@ -127,6 +127,9 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
             self.w.shape[0],
             rank=self.config.rank,
             weight=self.w - self.qw,
+            svd_mode=self.config.svd_mode,
+            svd_oversample=self.config.svd_oversample,
+            svd_niter=self.config.svd_niter,
         )
         self.wgt_idx = 0
         if len(self.hat_ws) > 1:

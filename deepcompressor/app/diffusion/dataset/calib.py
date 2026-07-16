@@ -5,6 +5,7 @@ import random
 import typing as tp
 from collections import OrderedDict
 from dataclasses import MISSING, dataclass
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -16,6 +17,16 @@ from diffusers.models.transformers.transformer_flux import (
     FluxTransformerBlock,
 )
 from omniconfig import configclass
+
+try:
+    from datasets import load_from_disk
+except ImportError:  # Hugging Face datasets remains optional for upstream users.
+    load_from_disk = None
+
+try:
+    from comfy.ldm.cosmos.predict2 import Attention as ComfyCosmosAttention
+except ImportError:  # ComfyUI remains optional for upstream Diffusers users.
+    ComfyCosmosAttention = ()
 
 from deepcompressor.data.cache import (
     IOTensorsCache,
@@ -73,8 +84,27 @@ class DiffusionCalibDataset(DiffusionDataset):
     data: list[dict[str, tp.Any]]
 
     def __init__(self, path: str, num_samples: int = -1, seed: int = 0) -> None:
-        super().__init__(path, num_samples=num_samples, seed=seed, ext=".pt")
-        data = [torch.load(path) for path in self.filepaths]
+        manifest_path = Path(path).expanduser().resolve()
+        if (manifest_path / "dataset_info.json").is_file():
+            if load_from_disk is None:
+                raise ImportError("Loading an Arrow calibration manifest requires the 'datasets' package")
+            manifest = load_from_disk(str(manifest_path))
+            if "selected_for_calibration" in manifest.column_names:
+                manifest = manifest.filter(lambda row: row["selected_for_calibration"])
+            indexes = list(range(len(manifest)))
+            if 0 < num_samples < len(indexes):
+                random.Random(seed).shuffle(indexes)
+                indexes = sorted(indexes[:num_samples])
+            root = manifest_path.parent
+            self.path = str(root)
+            self.filenames = [str(manifest[idx]["cache_path"]) for idx in indexes]
+            self.filepaths = [str(root / filename) for filename in self.filenames]
+        else:
+            super().__init__(str(manifest_path), num_samples=num_samples, seed=seed, ext=".pt")
+        # Calibration records contain structured forward kwargs rather than a
+        # weights-only state dict. PyTorch 2.6 changed torch.load's default;
+        # these are trusted, locally generated DeepCompressor cache files.
+        data = [torch.load(path, weights_only=False) for path in self.filepaths]
         random.Random(seed).shuffle(data)
         self.data = data
 
@@ -131,6 +161,18 @@ class DiffusionConcatCacheAction(ConcatCacheAction):
                     hidden_states_cache.reshape = AttentionInputReshapeFn(channels_dim)
             else:
                 assert hidden_states_cache.channels_dim == channels_dim
+        elif isinstance(module, ComfyCosmosAttention):
+            context = tensors.get("context")
+            if context is None:
+                tensors.pop("context", None)
+                cache.tensors.pop("context", None)
+            for key in tensors:
+                tensor_cache = cache.tensors[key]
+                if tensor_cache.channels_dim is None:
+                    tensor_cache.channels_dim = -1
+                    tensor_cache.reshape = LinearReshapeFn()
+                else:
+                    assert tensor_cache.channels_dim == -1
         return super().info(name, module, tensors, cache)
 
 
@@ -181,6 +223,16 @@ class DiffusionCalibCacheLoader(BaseCalibCacheLoader):
                     ),
                 ),
                 outputs=TensorCache(channels_dim=None, reshape=None),
+            )
+        elif isinstance(module, ComfyCosmosAttention):
+            return IOTensorsCache(
+                inputs=TensorsCache(
+                    OrderedDict(
+                        x=TensorCache(channels_dim=None, reshape=None),
+                        context=TensorCache(channels_dim=None, reshape=None),
+                    )
+                ),
+                outputs=TensorCache(channels_dim=-1, reshape=LinearReshapeFn()),
             )
         else:
             return super()._init_cache(name, module)
