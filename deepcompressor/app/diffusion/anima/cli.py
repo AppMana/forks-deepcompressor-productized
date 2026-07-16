@@ -169,7 +169,6 @@ def command_quantize(args: SimpleNamespace) -> int:
     quant_dir = output / "deepcompressor"
     packed_dir = output / "nunchaku"
     quant_dir.mkdir(parents=True, exist_ok=True)
-    tools.logging.setup(path=str(output / "ptq.log"), level=tools.logging.INFO)
     model_path = _require_path(args.model, "Anima Aesthetic 1.1 model")
     dataset_path = Path(args.dataset).expanduser().resolve()
     recipe = {
@@ -206,6 +205,9 @@ def command_quantize(args: SimpleNamespace) -> int:
         tags={"stage": "quantize", "recipe.fast": args.fast, "recipe.rank": args.rank},
     )
     with tracker:
+        # MLflow initializes Python logging on import. Install DeepCompressor's
+        # file handler afterward so the tracking client cannot replace it.
+        tools.logging.setup(path=str(output / "ptq.log"), level=tools.logging.INFO)
         tracker.save_reference(output / REFERENCE_FILENAME)
         tracker.log_params(recipe)
         tracker.log_artifact(recipe_path, artifact_path="recipe")
