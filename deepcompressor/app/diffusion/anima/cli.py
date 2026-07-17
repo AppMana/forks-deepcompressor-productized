@@ -726,7 +726,7 @@ def quantize_cli(
     activation_damping: float = typer.Option(
         1e-4,
         min=0.0,
-        help="Relative diagonal damping for activation-aware covariance factorization.",
+        help="Diagonal damping relative to the activation covariance's largest eigenvalue.",
     ),
     activation_num_tokens: int = typer.Option(
         64,
