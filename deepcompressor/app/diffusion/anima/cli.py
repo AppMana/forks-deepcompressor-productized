@@ -150,6 +150,7 @@ def command_collect(args: SimpleNamespace) -> int:
                 cfg=args.cfg,
                 sampler=args.sampler,
                 scheduler=args.scheduler,
+                resume=args.resume,
             )
             metadata["accelerate_rank"] = state.process_index
             metadata["accelerate_device"] = str(state.device)
@@ -628,6 +629,11 @@ def collect_cli(
         "",
         help="Optional comma-separated relative prompt counts for Accelerate ranks, e.g. 0.42,0.58.",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Reuse prompts whose latent and complete trajectory cache already exist.",
+    ),
 ) -> None:
     _invoke(
         command_collect,
@@ -645,6 +651,7 @@ def collect_cli(
         sampler=sampler,
         scheduler=scheduler,
         rank_weights=rank_weights,
+        resume=resume,
     )
 
 

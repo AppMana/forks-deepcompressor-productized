@@ -62,9 +62,15 @@ for approximately the same wall time:
 ```bash
 accelerate launch --multi_gpu --num_processes 2 --gpu_ids 0,1 \
   --module deepcompressor.app.diffusion.anima.cli collect \
-  --num-prompts 10000 --rank-weights 0.42,0.58 \
+  --num-prompts 10000 --rank-weights 0.42,0.58 --resume \
   --output runs/anima-aesthetic-v1.1/calibration-10000prompts
 ```
+
+`--resume` verifies the latent and every expected timestep/guidance cache for
+each completed prompt, reconstructs its manifest rows without loading tensor
+payloads, and regenerates only incomplete prompts. This makes multi-hour local
+and Kueue collections restartable without changing seeds or calibration
+selection.
 
 The same command works under a multi-node Accelerate launch in a Kueue
 JobSet. Every process must see the same output filesystem. Separate rank-32,

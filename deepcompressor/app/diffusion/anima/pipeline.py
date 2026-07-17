@@ -246,6 +246,7 @@ def collect_calibration_dataset(
     cfg: float = 4.0,
     sampler: str = "er_sde",
     scheduler: str = "simple",
+    resume: bool = False,
 ) -> dict[str, tp.Any]:
     """Collect full denoising trajectories and one final latent per prompt."""
 
@@ -271,6 +272,38 @@ def collect_calibration_dataset(
                 prompt_idx = local_prompt_idx
             prompt_rows.append({"name": name, "prompt": prompt, "prompt_index": prompt_idx})
             seed = hash_str_to_int(name)
+            selected_step = prompt_idx % steps
+            if resume and (latent_dir / f"{name}.pt").is_file():
+                num_guidances = 0
+                while (cache_dir / f"{name}-00000-{num_guidances}.pt").is_file():
+                    num_guidances += 1
+                complete = num_guidances > 0 and all(
+                    (cache_dir / f"{name}-{step:05d}-{guidance}.pt").is_file()
+                    for step in range(steps)
+                    for guidance in range(num_guidances)
+                )
+                if complete:
+                    selected_guidance = (prompt_idx // steps) % num_guidances
+                    selected_name = f"{name}-{selected_step:05d}-{selected_guidance}.pt"
+                    destination = calibration_dir / selected_name
+                    if not destination.exists():
+                        os.link(cache_dir / selected_name, destination)
+                    for step in range(steps):
+                        for guidance in range(num_guidances):
+                            records.append(
+                                {
+                                    "name": name,
+                                    "prompt": prompt,
+                                    "prompt_index": prompt_idx,
+                                    "seed": seed,
+                                    "step": step,
+                                    "guidance": guidance,
+                                    "cache_path": str(Path("caches") / f"{name}-{step:05d}-{guidance}.pt"),
+                                    "latent_path": str(Path("latents") / f"{name}.pt"),
+                                    "selected_for_calibration": step == selected_step and guidance == selected_guidance,
+                                }
+                            )
+                    continue
             latent = sample_latent(
                 components,
                 prompt,
@@ -319,7 +352,6 @@ def collect_calibration_dataset(
             # every trajectory for auditability, while selecting one
             # stratified timestamp/guidance record from each of the 100
             # prompts for the memory-bounded PTQ objective.
-            selected_step = prompt_idx % steps
             selected_guidance = (prompt_idx // steps) % num_guidances
             selected_record = next(
                 record
