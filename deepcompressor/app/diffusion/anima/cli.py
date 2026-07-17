@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import json
 import os
@@ -85,6 +86,21 @@ def _select_gpu(gpu: int) -> None:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
 
+def _weighted_partition(total: int, weights: list[float], rank: int) -> tuple[int, int]:
+    if not weights or any(weight <= 0 for weight in weights):
+        raise ValueError("Accelerate rank weights must all be positive")
+    if rank < 0 or rank >= len(weights):
+        raise IndexError(f"Rank {rank} is outside {len(weights)} partition weights")
+    weight_sum = sum(weights)
+    boundaries = [0]
+    cumulative = 0.0
+    for weight in weights[:-1]:
+        cumulative += weight
+        boundaries.append(round(total * cumulative / weight_sum))
+    boundaries.append(total)
+    return boundaries[rank], boundaries[rank + 1]
+
+
 def command_collect(args: SimpleNamespace) -> int:
     import torch
     from accelerate import PartialState
@@ -105,7 +121,19 @@ def command_collect(args: SimpleNamespace) -> int:
         shards.mkdir(parents=True, exist_ok=True)
     state.wait_for_everyone()
     prompts = load_prompt_dataset(args.prompts, args.num_prompts, args.prompt_offset)
-    with state.split_between_processes(prompts, apply_padding=False) as local_prompts:
+    partition = None
+    if args.rank_weights:
+        rank_weights = [float(value.strip()) for value in args.rank_weights.split(",") if value.strip()]
+        if len(rank_weights) != state.num_processes:
+            raise ValueError(
+                f"Expected {state.num_processes} comma-separated rank weights, received {len(rank_weights)}"
+            )
+        start, end = _weighted_partition(len(prompts), rank_weights, state.process_index)
+        partition = {"start": start, "end": end, "weight": rank_weights[state.process_index]}
+        prompt_context = contextlib.nullcontext(prompts.select(range(start, end)))
+    else:
+        prompt_context = state.split_between_processes(prompts, apply_padding=False)
+    with prompt_context as local_prompts:
         components = load_components(
             _require_path(args.model, "Anima Aesthetic 1.1 model"),
             _require_path(args.text_encoder, "Anima text encoder"),
@@ -125,6 +153,7 @@ def command_collect(args: SimpleNamespace) -> int:
             )
             metadata["accelerate_rank"] = state.process_index
             metadata["accelerate_device"] = str(state.device)
+            metadata["accelerate_partition"] = partition
             shard_path = shards / f"rank-{state.process_index:05d}.json"
             shard_path.write_text(json.dumps(metadata, indent=2) + "\n")
         finally:
@@ -595,6 +624,10 @@ def collect_cli(
     cfg: float = typer.Option(4.0, min=0.0),
     sampler: str = typer.Option("er_sde"),
     scheduler: str = typer.Option("simple"),
+    rank_weights: str = typer.Option(
+        "",
+        help="Optional comma-separated relative prompt counts for Accelerate ranks, e.g. 0.42,0.58.",
+    ),
 ) -> None:
     _invoke(
         command_collect,
@@ -611,6 +644,7 @@ def collect_cli(
         cfg=cfg,
         sampler=sampler,
         scheduler=scheduler,
+        rank_weights=rank_weights,
     )
 
 

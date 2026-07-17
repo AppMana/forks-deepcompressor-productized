@@ -54,6 +54,18 @@ accelerate launch --multi_gpu --num_processes 2 \
   --output runs/anima-aesthetic-v1.1/dataset
 ```
 
+If the GPUs have different sustained throughput, give faster ranks more
+prompts so the final barrier does not wait on an equal but slower shard. For
+example, a 42/58 split keeps a desktop-contended GPU 0 and an idle GPU 1 busy
+for approximately the same wall time:
+
+```bash
+accelerate launch --multi_gpu --num_processes 2 --gpu_ids 0,1 \
+  --module deepcompressor.app.diffusion.anima.cli collect \
+  --num-prompts 10000 --rank-weights 0.42,0.58 \
+  --output runs/anima-aesthetic-v1.1/calibration-10000prompts
+```
+
 The same command works under a multi-node Accelerate launch in a Kueue
 JobSet. Every process must see the same output filesystem. Separate rank-32,
 rank-128, or recipe experiments are independent jobs and can occupy separate
