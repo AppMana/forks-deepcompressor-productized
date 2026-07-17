@@ -205,7 +205,7 @@ First prove the complete pack/load path:
 ```bash
 deepcompressor-svdquant quantize \
   --gpu 0 \
-  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/hf_dataset \
+  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/calibration \
   --num-samples 1 --rank 32 --num-iters 1 --fast --resume \
   --run-name anima-r32-smoke \
   --output runs/anima-aesthetic-v1.1/anima-r32-smoke
@@ -216,7 +216,7 @@ Use the released calibration scale for the PTQ control, rather than trying to lo
 ```bash
 deepcompressor-svdquant quantize \
   --gpu 0 \
-  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/hf_dataset \
+  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/calibration \
   --num-samples 128 --rank 32 --num-iters 100 --weight-svd --resume \
   --run-name anima-r32-exact-128samples \
   --output runs/anima-aesthetic-v1.1/anima-r32-exact-128samples
@@ -262,7 +262,7 @@ Run a bounded rank-32 pilot first:
 ```bash
 deepcompressor-svdquant quantize \
   --gpu 0 \
-  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/hf_dataset \
+  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/calibration \
   --num-samples 100 --rank 32 --num-iters 4 --fast --activation-aware \
   --activation-damping 1e-4 --activation-num-tokens 64 --resume \
   --run-name anima-r32-aware-100samples-4iter \
@@ -296,7 +296,7 @@ falls below the threshold.
 deepcompressor-svdquant benchmark \
   --gpu 0 \
   --manifest runs/anima-aesthetic-v1.1/anima-r32-exact-128samples/nunchaku/anima-aesthetic-v1.1-svdquant-int4.json \
-  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/hf_dataset \
+  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/calibration \
   --num-samples 16 --warmup 2 --iterations 10 \
   --output runs/anima-aesthetic-v1.1/anima-r32-exact-128samples/benchmark
 ```
