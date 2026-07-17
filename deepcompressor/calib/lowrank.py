@@ -19,6 +19,29 @@ __all__ = ["QuantLowRankCalibrator", "solve_activation_aware_low_rank"]
 
 
 @torch.no_grad()
+def _estimate_largest_eigenvalue(matrix: torch.Tensor, *, num_iters: int = 12) -> torch.Tensor:
+    """Estimate the largest covariance eigenvalue without an O(n^3) eigensolve."""
+
+    size = matrix.shape[0]
+    devices = [matrix.device.index] if matrix.is_cuda else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(0)
+        vector = torch.randn(size, device=matrix.device, dtype=matrix.dtype)
+    vector.div_(torch.linalg.vector_norm(vector).clamp_min(torch.finfo(matrix.dtype).tiny))
+    estimate = matrix.diagonal().abs().amax()
+    for _ in range(num_iters):
+        product = matrix @ vector
+        norm = torch.linalg.vector_norm(product)
+        if not torch.isfinite(norm):
+            raise RuntimeError("Activation covariance spectral estimate is non-finite")
+        if norm <= torch.finfo(matrix.dtype).tiny:
+            break
+        vector = product / norm
+        estimate = torch.maximum(estimate, torch.dot(vector, matrix @ vector).abs())
+    return estimate.clamp_min(torch.finfo(matrix.dtype).tiny)
+
+
+@torch.no_grad()
 def solve_activation_aware_low_rank(
     weight: torch.Tensor,
     quantized_weight: torch.Tensor,
@@ -62,16 +85,18 @@ def solve_activation_aware_low_rank(
     if not torch.isfinite(covariance).all():
         raise RuntimeError("Activation covariance contains non-finite values")
     diagonal_values = covariance.diagonal()
-    diagonal_scale = diagonal_values.mean().abs().clamp_min(torch.finfo(solve_dtype).tiny)
+    spectral_scale = _estimate_largest_eigenvalue(covariance)
     # The sampled covariance is often singular: a 7,104-wide Anima MLP with
     # 100 caches x 64 rows has rank at most 6,400. In FP32, a fixed damping
-    # value can still leave a nominally PSD matrix numerically indefinite.
-    # Start with the requested statistical damping, then increase only the
-    # diagonal regularizer until Cholesky succeeds.
+    # value scaled by the *mean* variance can be thousands of times too weak
+    # in poorly observed directions. Scale the ridge by the largest covariance
+    # mode instead. ``damping=1e-4`` then approximately caps a singular
+    # covariance's condition number at 1e4. Increase it further only when
+    # finite-precision Cholesky still requires it.
     numerical_floor = (
-        torch.finfo(solve_dtype).eps * covariance.shape[0] * diagonal_values.abs().amax().clamp_min(diagonal_scale)
+        torch.finfo(solve_dtype).eps * covariance.shape[0] * diagonal_values.abs().amax().clamp_min(spectral_scale)
     )
-    diagonal = torch.maximum(damping * diagonal_scale, numerical_floor)
+    diagonal = torch.maximum(damping * spectral_scale, numerical_floor)
     regularized = covariance.clone()
     regularized.diagonal().add_(diagonal)
     max_cholesky_attempts = 8
@@ -205,6 +230,7 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
         self.activation_cache: TensorCache | None = None
         self.activation_covariance: torch.Tensor | None = None
         self.quantized_cross: torch.Tensor | None = None
+        self.initial_branch: LowRankBranch | None = None
         if self.config.activation_aware:
             if not isinstance(x_acts, TensorsCache) or x_acts.num_tensors != 1:
                 raise ValueError("Activation-aware low-rank calibration requires exactly one input activation cache")
@@ -219,20 +245,22 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
             )
         else:
             self.qw = 0
-            if self.config.activation_aware:
-                # Preserve SVDQuant's weight-SVD initialization. The first
-                # activation-aware iteration improves this initialized W4
-                # residual rather than quantizing the original W directly.
-                initial = LowRankBranch(
-                    self.w.shape[1],
-                    self.w.shape[0],
-                    rank=self.config.rank,
-                    weight=self.w,
-                    svd_mode=self.config.svd_mode,
-                    svd_oversample=self.config.svd_oversample,
-                    svd_niter=self.config.svd_niter,
-                )
-                self._update_quantized_weights(initial)
+        if self.config.activation_aware:
+            # Candidate zero is released SVDQuant's weight-residual SVD. Keep
+            # and score it instead of silently discarding it after using it to
+            # initialize Q(W - BA). Activation-aware candidates can therefore
+            # improve the canonical branch, but cannot erase the control from
+            # the local OutputsError search.
+            self.initial_branch = LowRankBranch(
+                self.w.shape[1],
+                self.w.shape[0],
+                rank=self.config.rank,
+                weight=self.w - self.qw,
+                svd_mode=self.config.svd_mode,
+                svd_oversample=self.config.svd_oversample,
+                svd_niter=self.config.svd_niter,
+            )
+            self._update_quantized_weights(self.initial_branch)
 
     def _update_quantized_weights(self, branch: LowRankBranch) -> None:
         """Quantize the W4 residual represented alongside ``branch``."""
@@ -333,7 +361,12 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
             `LowRankBranch`:
                 The next candidate.
         """
-        if self.config.activation_aware:
+        if self.config.activation_aware and self.iter == 0:
+            if self.initial_branch is None:
+                raise RuntimeError("Activation-aware calibration lost its weight-SVD baseline candidate")
+            branch = self.initial_branch
+            self.initial_branch = None
+        elif self.config.activation_aware:
             covariance, quantized_cross = self._get_activation_statistics()
             branch = solve_activation_aware_low_rank(
                 self.w,

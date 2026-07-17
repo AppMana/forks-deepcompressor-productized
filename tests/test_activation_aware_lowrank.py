@@ -1,6 +1,12 @@
+from types import MethodType, SimpleNamespace
+
 import torch
 
-from deepcompressor.calib.lowrank import solve_activation_aware_low_rank
+from deepcompressor.calib.lowrank import (
+    QuantLowRankCalibrator,
+    _estimate_largest_eigenvalue,
+    solve_activation_aware_low_rank,
+)
 from deepcompressor.nn.patch.lowrank import LowRankBranch
 
 
@@ -28,7 +34,7 @@ def test_activation_aware_solver_matches_reduced_rank_regression() -> None:
     )
 
     regularized = (covariance + covariance.mT) * 0.5
-    regularized += torch.eye(in_features) * (damping * covariance.diagonal().mean().abs())
+    regularized += torch.eye(in_features) * (damping * _estimate_largest_eigenvalue(covariance))
     chol = torch.linalg.cholesky(regularized)
     cross_output_input = weight @ covariance - quantized_weight @ quantized_cross
     whitened = torch.linalg.solve_triangular(chol, cross_output_input.mT, upper=False).mT
@@ -98,3 +104,54 @@ def test_activation_aware_solver_adapts_damping_for_numerically_indefinite_covar
     )
 
     assert torch.isfinite(branch.get_effective_weight()).all()
+
+
+def test_activation_aware_solver_regularizes_rank_deficient_weak_directions() -> None:
+    torch.manual_seed(23)
+    in_features, out_features, rank = 32, 12, 4
+    basis = torch.randn(in_features, 6)
+    covariance = basis @ basis.mT
+    covariance /= covariance.diagonal().mean()
+    weight = torch.randn(out_features, in_features)
+    quantized_weight = torch.round(weight * 2) / 2
+    quantized_cross = covariance.clone()
+
+    branch = solve_activation_aware_low_rank(
+        weight,
+        quantized_weight,
+        covariance,
+        quantized_cross,
+        rank=rank,
+        damping=1e-3,
+        svd_mode="exact",
+        svd_oversample=8,
+        svd_niter=2,
+    )
+
+    effective = branch.get_effective_weight()
+    assert torch.isfinite(effective).all()
+    assert torch.linalg.matrix_norm(effective) < 2 * torch.linalg.matrix_norm(weight - quantized_weight)
+
+
+def test_activation_aware_iteration_zero_scores_weight_svd_baseline() -> None:
+    calibrator = object.__new__(QuantLowRankCalibrator)
+    calibrator.config = SimpleNamespace(activation_aware=True)
+    calibrator.iter = 0
+    calibrator.wgt_idx = 99
+    calibrator.initial_branch = object()
+    updated = []
+
+    def update_quantized_weights(self, branch) -> None:
+        updated.append(branch)
+
+    def fail_if_statistics_are_requested(self):
+        raise AssertionError("candidate zero must not request activation statistics")
+
+    calibrator._update_quantized_weights = MethodType(update_quantized_weights, calibrator)
+    calibrator._get_activation_statistics = MethodType(fail_if_statistics_are_requested, calibrator)
+
+    branch = calibrator._ask()
+
+    assert branch is updated[0]
+    assert calibrator.initial_branch is None
+    assert calibrator.wgt_idx == 0

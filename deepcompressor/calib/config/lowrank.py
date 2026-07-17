@@ -42,7 +42,7 @@ class QuantLowRankCalibConfig(SearchBasedCalibConfig, QuantLowRankConfig):
         activation_aware (`bool`, *optional*, default=`False`):
             Whether to solve each low-rank branch with calibration activation statistics.
         activation_damping (`float`, *optional*, default=`1e-4`):
-            Relative diagonal damping for activation covariance factorization.
+            Diagonal damping relative to the activation covariance's largest eigenvalue.
         activation_num_tokens (`int`, *optional*, default=`64`):
             Deterministically sampled activation rows per cached tensor, or -1 for all rows.
     """
@@ -130,7 +130,7 @@ class SkipBasedQuantLowRankCalibConfig(SkipBasedConfig, QuantLowRankCalibConfig)
         activation_aware (`bool`, *optional*, default=`False`):
             Whether to solve each low-rank branch with calibration activation statistics.
         activation_damping (`float`, *optional*, default=`1e-4`):
-            Relative diagonal damping for activation covariance factorization.
+            Diagonal damping relative to the activation covariance's largest eigenvalue.
         activation_num_tokens (`int`, *optional*, default=`64`):
             Deterministically sampled activation rows per cached tensor, or -1 for all rows.
         skips (`list[str]`, *optional*, default=`[]`):

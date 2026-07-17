@@ -189,9 +189,9 @@ The current exact Anima recipe has these candidate bounds per calibrated project
 The fast Anima recipe uses one manual smoothing candidate and randomized SVD. `--num-iters` still controls residual
 passes.
 
-The product CLI defaults to `--activation-aware`. Each residual iteration solves one activation-aware candidate,
-requantizes `W - BA`, and lets the unchanged DeepCompressor `OutputsError` accept or reject it. Use `--weight-svd` to run
-the released candidate generator unchanged.
+The product CLI defaults to `--activation-aware`. Candidate zero is the released weight-residual SVD and is scored as a
+real control. Later residual iterations solve activation-aware candidates, requantize `W - BA`, and let the unchanged
+DeepCompressor `OutputsError` accept or reject them. Use `--weight-svd` to run only the released candidate generator.
 
 Ten thousand examples do not imply ten thousand candidates. More examples reduce sampling error in candidate selection;
 they do not expand the candidate family or guarantee lower calibration error. The dataset loader now opens selected
@@ -241,21 +241,24 @@ It then solves the regularized reduced-rank regression:
 
 ```text
 minimize over rank(L) <= r:
-  E[||W X - Q(W) Q(X) - L X||²] + damping * ||L||²
+  E[||W X - Q(W) Q(X) - L X||²] + lambda * ||L||²
 ```
 
-If `C + damping*I = chol @ chol.T`, the whitened unconstrained correction is `H @ chol^-T`. A rank-32 or rank-128 SVD of
-that matrix, transformed back by `chol^-1`, gives `L = B @ A`. The factors have the same shapes and meaning as released
-SVDQuant and are exported through the unchanged Nunchaku `proj_down`/`proj_up` fields.
+If `C + lambda*I = chol @ chol.T`, where `lambda = damping * approximate_largest_eigenvalue(C)`, the whitened
+unconstrained correction is `H @ chol^-T`. A rank-32 or rank-128 SVD of that matrix, transformed back by `chol^-1`, gives
+`L = B @ A`. Spectral scaling makes damping meaningful for highly anisotropic or rank-deficient empirical covariance;
+for example, `damping=1e-4` approximately limits a singular covariance to condition number `1e4`. The factors have the
+same shapes and meaning as released SVDQuant and are exported through unchanged Nunchaku `proj_down`/`proj_up` fields.
 
 The covariance and original/quantized cross-covariance are computed once per projection group. By default, 64 uniformly
 spaced activation rows are taken from each cached tensor, so every calibration batch contributes without materializing
 all spatial tokens. `--activation-num-tokens -1` uses every row. The dataset itself now loads selected records lazily;
 DeepCompressor still materializes the current block's activation cache because its blockwise calibration requires it.
 
-After each solve, DeepCompressor requantizes `W - L`, evaluates its unchanged full `OutputsError`, and keeps the best
-iteration. Thus the local closed-form regression proposes candidates and the existing module-level objective selects
-them. Blocks remain ordered, and the checkpoint/runtime path is identical to the weight-SVD control.
+Iteration zero first scores the released weight-SVD branch. After each later solve, DeepCompressor requantizes `W - L`,
+evaluates its unchanged full `OutputsError`, and keeps the best iteration. Thus the local closed-form regression proposes
+candidates while the canonical branch remains in the candidate set and the existing module-level objective selects
+among them. Blocks remain ordered, and the checkpoint/runtime path is identical to the weight-SVD control.
 
 Run a bounded rank-32 pilot first:
 
@@ -269,10 +272,10 @@ deepcompressor-svdquant quantize \
   --output runs/anima-aesthetic-v1.1/anima-r32-aware-100samples-4iter
 ```
 
-MLflow records `low_rank_solver=activation-aware-rrr`, damping, token sampling, sample count, rank, and iteration count.
-If the pilot improves held-out raw pixels, increase the sample count while keeping those controls explicit. A later
-gradient-only polish of `A/B` can use the same DeepCompressor `OutputsError`, but it is not required by this solver and is
-not implemented yet.
+MLflow records `low_rank_solver=activation-aware-rrr-spectral-ridge`, the weight-SVD candidate-zero policy, damping,
+token sampling, sample count, rank, and iteration count. If the pilot improves held-out raw pixels, increase the sample
+count while keeping those controls explicit. A later gradient-only polish of `A/B` can use the same DeepCompressor
+`OutputsError`, but it is not required by this solver and is not implemented yet.
 
 ## Validate raw pixels
 
