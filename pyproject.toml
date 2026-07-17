@@ -55,6 +55,7 @@ dependencies = [
 ]
 
 [project.scripts]
+deepcompressor-audit-prompts = "deepcompressor.app.diffusion.anima.prompt_audit:main"
 deepcompressor-svdquant = "deepcompressor.app.diffusion.anima.cli:main"
 
 [project.urls]

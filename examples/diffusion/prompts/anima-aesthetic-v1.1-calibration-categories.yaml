@@ -1,0 +1,104 @@
+version: 1
+model: anima-aesthetic-v1.1
+prompt_style: detailed natural language with safe Anima tags and no score tags
+categories:
+  - {id: 1, slug: solo-character-portraits, name: Solo Character Portraits, mode: character, focus: "a distinctive original character in a carefully observed solo portrait"}
+  - {id: 2, slug: expressive-closeups, name: Expressive Close-ups, mode: character, focus: "an expressive close-up of an original character communicating a strong emotion through eyes and gesture"}
+  - {id: 3, slug: full-body-fashion, name: Full-body Fashion, mode: character, focus: "an original character displaying a complete layered outfit with readable fabric construction and accessories"}
+  - {id: 4, slug: magical-girl-transformations, name: Magical Girl Transformations, mode: character, focus: "an original magical girl transforming through ribbons, light, and symbolic costume details"}
+  - {id: 5, slug: fantasy-swordspeople, name: Fantasy Swordspeople, mode: character, focus: "an original fantasy swordsman or swordswoman whose equipment and stance reveal a personal history"}
+  - {id: 6, slug: mages-and-alchemists, name: Mages and Alchemists, mode: character, focus: "an original mage or alchemist working with luminous diagrams, unusual vessels, and tactile materials"}
+  - {id: 7, slug: science-fiction-pilots, name: Science-fiction Pilots, mode: character, focus: "an original spacecraft pilot in a functional suit surrounded by compact cockpit technology"}
+  - {id: 8, slug: cyberpunk-street-youth, name: Cyberpunk Street Youth, mode: character, focus: "an original cyberpunk street character wearing customized technology and expressive urban fashion"}
+  - {id: 9, slug: historical-court-dress, name: Historical Court Dress, mode: character, focus: "an original court figure in historically inspired ceremonial clothing with intricate textiles"}
+  - {id: 10, slug: school-day-moments, name: School-day Moments, mode: character, focus: "original students sharing a specific everyday moment during a lively school day"}
+  - {id: 11, slug: cozy-domestic-life, name: Cozy Domestic Life, mode: character, focus: "an original character absorbed in a warm and recognizable domestic routine"}
+  - {id: 12, slug: workplace-professionals, name: Workplace Professionals, mode: character, focus: "original professionals collaborating in a visually distinctive workplace"}
+  - {id: 13, slug: musicians-on-stage, name: Musicians on Stage, mode: character, focus: "an original musician performing with a clearly rendered instrument and commanding stage presence"}
+  - {id: 14, slug: dancers-in-motion, name: Dancers in Motion, mode: character, focus: "an original dancer captured in an expressive movement with flowing costume shapes"}
+  - {id: 15, slug: athletes-competing, name: Athletes Competing, mode: character, focus: "original athletes demonstrating effort, balance, and teamwork during competition"}
+  - {id: 16, slug: chefs-and-bakers, name: Chefs and Bakers, mode: character, focus: "an original chef or baker preparing a dish amid inviting tools and ingredients"}
+  - {id: 17, slug: artisans-and-craftspeople, name: Artisans and Craftspeople, mode: character, focus: "an original artisan shaping a handmade object in a material-rich workshop"}
+  - {id: 18, slug: travelers-and-explorers, name: Travelers and Explorers, mode: character, focus: "an original traveler studying an unfamiliar place with practical gear and visible curiosity"}
+  - {id: 19, slug: detectives-and-mysteries, name: Detectives and Mysteries, mode: character, focus: "an original detective piecing together a visual mystery from subtle environmental clues"}
+  - {id: 20, slug: heroes-rescuing-others, name: Heroes Rescuing Others, mode: character, focus: "an original hero protecting or rescuing someone through courage rather than spectacle alone"}
+  - {id: 21, slug: villains-and-rivals, name: Villains and Rivals, mode: character, focus: "an original rival or theatrical villain with an intelligible motive and memorable silhouette"}
+  - {id: 22, slug: royalty-and-nobility, name: Royalty and Nobility, mode: character, focus: "an original royal figure balancing ceremonial grandeur with a private human moment"}
+  - {id: 23, slug: friendships-and-ensembles, name: Friendships and Ensembles, mode: character, focus: "a diverse group of original friends whose poses and interactions reveal their relationships"}
+  - {id: 24, slug: family-and-generations, name: Family and Generations, mode: character, focus: "an original intergenerational family sharing an affectionate everyday experience"}
+  - {id: 25, slug: quiet-romance, name: Quiet Romance, mode: character, focus: "two original adult characters sharing a restrained and tender romantic moment"}
+  - {id: 26, slug: fantasy-villages, name: Fantasy Villages, mode: world, focus: "a lived-in fantasy village shaped by local crafts, weather, and community rituals"}
+  - {id: 27, slug: enchanted-forests, name: Enchanted Forests, mode: world, focus: "an enchanted forest whose plants, paths, and small signs of magic form a coherent ecosystem"}
+  - {id: 28, slug: ancient-ruins, name: Ancient Ruins, mode: world, focus: "ancient ruins where architecture, vegetation, and surviving symbols imply a forgotten culture"}
+  - {id: 29, slug: castle-interiors, name: Castle Interiors, mode: world, focus: "a richly functional castle interior with layered history and dramatic circulation spaces"}
+  - {id: 30, slug: magical-libraries, name: Magical Libraries, mode: world, focus: "a magical library filled with unusual methods of storing, reading, and protecting knowledge"}
+  - {id: 31, slug: seaside-towns, name: Seaside Towns, mode: world, focus: "a compact seaside town animated by tides, working boats, and wind-worn architecture"}
+  - {id: 32, slug: mountain-journeys, name: Mountain Journeys, mode: world, focus: "a high mountain route where travelers and terrain communicate scale and changing weather"}
+  - {id: 33, slug: desert-caravans, name: Desert Caravans, mode: world, focus: "a desert caravan crossing a varied landscape with practical equipment and cultural detail"}
+  - {id: 34, slug: arctic-expeditions, name: Arctic Expeditions, mode: world, focus: "an arctic expedition navigating luminous ice, severe weather, and fragile shelter"}
+  - {id: 35, slug: tropical-islands, name: Tropical Islands, mode: world, focus: "a tropical island community integrated with dense plants, bright water, and handmade structures"}
+  - {id: 36, slug: rural-countryside, name: Rural Countryside, mode: world, focus: "a rural countryside scene organized around seasonal work, paths, fields, and distant homes"}
+  - {id: 37, slug: urban-street-life, name: Urban Street Life, mode: world, focus: "a busy illustrated city street where pedestrians, storefronts, and transit tell overlapping stories"}
+  - {id: 38, slug: neon-megacities, name: Neon Megacities, mode: world, focus: "a vast neon megacity with legible neighborhoods, elevated movement, and human-scale activity"}
+  - {id: 39, slug: space-stations, name: Space Stations, mode: world, focus: "a working orbital station designed around daily life, maintenance, and views of space"}
+  - {id: 40, slug: starship-interiors, name: Starship Interiors, mode: world, focus: "a purposeful starship interior with believable controls, storage, circulation, and crew traces"}
+  - {id: 41, slug: alien-planets, name: Alien Planets, mode: world, focus: "an alien planetary landscape governed by unfamiliar geology, atmosphere, and living forms"}
+  - {id: 42, slug: underwater-kingdoms, name: Underwater Kingdoms, mode: world, focus: "an underwater kingdom whose architecture and inhabitants respond convincingly to ocean currents"}
+  - {id: 43, slug: post-apocalyptic-settlements, name: Post-apocalyptic Settlements, mode: world, focus: "a hopeful post-apocalyptic settlement built through repair, reuse, and collective effort"}
+  - {id: 44, slug: solarpunk-communities, name: Solarpunk Communities, mode: world, focus: "a solarpunk community combining abundant plants, public space, and understandable clean technology"}
+  - {id: 45, slug: steampunk-cities, name: Steampunk Cities, mode: world, focus: "a steampunk city whose mechanical infrastructure shapes architecture and ordinary routines"}
+  - {id: 46, slug: festivals-and-parades, name: Festivals and Parades, mode: world, focus: "a community festival or parade filled with handmade decorations, performers, and spectators"}
+  - {id: 47, slug: markets-and-bazaars, name: Markets and Bazaars, mode: world, focus: "a crowded market where distinctive goods, vendors, and customers create many small narratives"}
+  - {id: 48, slug: cafes-and-restaurants, name: Cafes and Restaurants, mode: world, focus: "an inviting cafe or restaurant with specific cuisine, decor, staff, and patrons"}
+  - {id: 49, slug: bedrooms-and-studios, name: Bedrooms and Studios, mode: world, focus: "a personal bedroom or creative studio revealing its occupant through organized visual clues"}
+  - {id: 50, slug: schools-and-campuses, name: Schools and Campuses, mode: world, focus: "a school or campus environment animated by learning, clubs, architecture, and changing seasons"}
+  - {id: 51, slug: cats-with-personality, name: Cats with Personality, mode: creature, focus: "one or more expressive cats behaving naturally within a story-rich illustrated setting"}
+  - {id: 52, slug: dogs-with-jobs, name: Dogs with Jobs, mode: creature, focus: "an expressive dog carrying out a recognizable job or helpful task with a human partner"}
+  - {id: 53, slug: birds-in-motion, name: Birds in Motion, mode: creature, focus: "birds in characteristic motion with accurate wing rhythms and a strong environmental context"}
+  - {id: 54, slug: horses-and-riders, name: Horses and Riders, mode: creature, focus: "horses and adult riders communicating trust through posture, equipment, and shared movement"}
+  - {id: 55, slug: foxes-and-tanuki, name: Foxes and Tanuki, mode: creature, focus: "clever foxes or tanuki causing gentle mischief in a folklore-inspired setting"}
+  - {id: 56, slug: rabbits-and-small-mammals, name: Rabbits and Small Mammals, mode: creature, focus: "rabbits and other small mammals exploring an environment built at their intimate scale"}
+  - {id: 57, slug: marine-life, name: Marine Life, mode: creature, focus: "varied marine animals moving through a richly structured underwater habitat"}
+  - {id: 58, slug: insects-and-butterflies, name: Insects and Butterflies, mode: creature, focus: "insects or butterflies depicted with jewel-like anatomy among oversized botanical details"}
+  - {id: 59, slug: dragons, name: Dragons, mode: creature, focus: "an original dragon whose anatomy, age, habitat, and temperament form a unified design"}
+  - {id: 60, slug: griffins-and-winged-beasts, name: Griffins and Winged Beasts, mode: creature, focus: "an original griffin or winged beast interacting naturally with a windswept habitat"}
+  - {id: 61, slug: yokai-and-spirits, name: Yokai and Spirits, mode: creature, focus: "original yokai or gentle spirits revealing themselves through strange but poetic local phenomena"}
+  - {id: 62, slug: slimes-and-tiny-monsters, name: Slimes and Tiny Monsters, mode: creature, focus: "small friendly monsters or slimes improvising a miniature adventure from ordinary objects"}
+  - {id: 63, slug: giants-and-kaiju, name: Giants and Kaiju, mode: creature, focus: "a colossal original creature shown with a clear sense of scale and environmental consequence"}
+  - {id: 64, slug: animal-companions, name: Animal Companions, mode: creature, focus: "an original character and animal companion cooperating through readable trust and body language"}
+  - {id: 65, slug: botanical-studies, name: Botanical Studies, mode: creature, focus: "a decorative study of imaginary plants with coherent structures, textures, and growth stages"}
+  - {id: 66, slug: flower-gardens, name: Flower Gardens, mode: creature, focus: "a cultivated flower garden alive with pathways, caretaking details, and seasonal variation"}
+  - {id: 67, slug: forests-through-seasons, name: Forests through the Seasons, mode: creature, focus: "a forest landscape expressing a precise seasonal transition through plants, animals, and weather"}
+  - {id: 68, slug: dramatic-weather, name: Dramatic Weather, mode: creature, focus: "a landscape transformed by dramatic but non-destructive weather rendered as a central character"}
+  - {id: 69, slug: celestial-skies, name: Celestial Skies, mode: creature, focus: "an illustrated sky filled with moons, stars, clouds, and a grounded observer or landmark"}
+  - {id: 70, slug: waterside-landscapes, name: Waterside Landscapes, mode: creature, focus: "a landscape organized around reflective water, shoreline ecology, and atmospheric distance"}
+  - {id: 71, slug: sword-duels, name: Sword Duels, mode: action, focus: "two original adult swordspeople engaged in a readable non-graphic duel with contrasting techniques"}
+  - {id: 72, slug: martial-arts, name: Martial Arts, mode: action, focus: "original adult martial artists demonstrating controlled technique, momentum, and mutual respect"}
+  - {id: 73, slug: archery-contests, name: Archery Contests, mode: action, focus: "an archery contest focused on posture, concentration, moving fabric, and the arrow's path"}
+  - {id: 74, slug: mecha-battles, name: Mecha Battles, mode: action, focus: "original piloted mecha in a dynamic but readable clash of scale, armor, and terrain"}
+  - {id: 75, slug: aerial-adventures, name: Aerial Adventures, mode: action, focus: "fantastical aircraft and skilled pilots maneuvering through a complex illustrated sky"}
+  - {id: 76, slug: magical-spellcasting, name: Magical Spellcasting, mode: action, focus: "original spellcasters shaping magic through clear gestures, symbols, materials, and consequences"}
+  - {id: 77, slug: chase-scenes, name: Chase Scenes, mode: action, focus: "an energetic non-graphic chase with a clear route, expressive participants, and environmental obstacles"}
+  - {id: 78, slug: treasure-discoveries, name: Treasure Discoveries, mode: action, focus: "original explorers encountering a meaningful treasure in a carefully foreshadowed location"}
+  - {id: 79, slug: dungeon-exploration, name: Dungeon Exploration, mode: action, focus: "a cooperative adventuring party navigating a dungeon through observation and practical problem solving"}
+  - {id: 80, slug: camping-and-survival, name: Camping and Survival, mode: action, focus: "original travelers building shelter, preparing food, or reading terrain during a wilderness camp"}
+  - {id: 81, slug: team-sports, name: Team Sports, mode: action, focus: "an original team coordinating during a fast but legible athletic play"}
+  - {id: 82, slug: racing-and-vehicles, name: Racing and Vehicles, mode: action, focus: "distinctive illustrated vehicles competing on a route shaped by terrain and spectators"}
+  - {id: 83, slug: magical-flight, name: Magical Flight, mode: action, focus: "original characters flying by broom, glider, cape, or gentle magic through layered airspace"}
+  - {id: 84, slug: underwater-adventures, name: Underwater Adventures, mode: action, focus: "original divers or aquatic characters solving a problem within a vibrant underwater environment"}
+  - {id: 85, slug: comedic-mishaps, name: Comedic Mishaps, mode: action, focus: "original characters caught in a harmless visual comedy of timing, expression, and cascading objects"}
+  - {id: 86, slug: fantasy-weapons, name: Fantasy Weapons, mode: design, focus: "a curated set of original fantasy weapons designed around a shared culture and material language"}
+  - {id: 87, slug: savory-food, name: Savory Food Illustration, mode: design, focus: "an appetizing illustrated savory meal with identifiable ingredients, utensils, and dining context"}
+  - {id: 88, slug: desserts-and-confectionery, name: Desserts and Confectionery, mode: design, focus: "an imaginative arrangement of desserts with varied textures, decoration, and serving pieces"}
+  - {id: 89, slug: fashion-accessories, name: Fashion Accessories, mode: design, focus: "a coordinated collection of original fashion accessories with functional construction and ornament"}
+  - {id: 90, slug: interior-design, name: Interior Design, mode: design, focus: "a complete illustrated room design balancing circulation, furniture, storage, and personal detail"}
+  - {id: 91, slug: architecture-exteriors, name: Architecture Exteriors, mode: design, focus: "an original building exterior whose structure, entrance, materials, and surroundings make sense together"}
+  - {id: 92, slug: vehicle-concepts, name: Vehicle Concepts, mode: design, focus: "an original vehicle concept with a clear purpose, scale, construction, and user"}
+  - {id: 93, slug: robots-and-gadgets, name: Robots and Gadgets, mode: design, focus: "a family of appealing robots or gadgets designed for understandable everyday functions"}
+  - {id: 94, slug: books-and-stationery, name: Books and Stationery, mode: design, focus: "a tactile arrangement of books, paper, writing tools, and small personal keepsakes"}
+  - {id: 95, slug: musical-instruments, name: Musical Instruments, mode: design, focus: "original musical instruments whose forms suggest how they are held, played, and heard"}
+  - {id: 96, slug: chibi-comedy, name: Chibi Comedy, mode: style, focus: "a compact chibi comedy scene with exaggerated expressions and a crystal-clear visual punchline"}
+  - {id: 97, slug: anime-screenshot-stories, name: Anime Screenshot Stories, mode: style, focus: "an anime screenshot from an implied larger story with purposeful acting and cinematic continuity"}
+  - {id: 98, slug: painterly-fantasy, name: Painterly Fantasy, mode: style, focus: "a painterly fantasy illustration combining expressive brush texture with readable anime design"}
+  - {id: 99, slug: graphic-posters, name: Graphic Posters, mode: style, focus: "a bold illustrated poster built from a limited palette, strong silhouette, and non-text graphic motifs"}
+  - {id: 100, slug: surreal-dreamscapes, name: Surreal Dreamscapes, mode: style, focus: "a surreal dreamscape where impossible scale and transformation still follow a poetic visual logic"}
