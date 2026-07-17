@@ -202,6 +202,7 @@ def command_quantize(args: SimpleNamespace) -> int:
         tracking_uri=args.mlflow_uri,
         experiment_name=args.experiment_name,
         run_name=args.run_name,
+        run_id=args.mlflow_run_id,
         tags={"stage": "quantize", "recipe.fast": args.fast, "recipe.rank": args.rank},
     )
     with tracker:
@@ -636,6 +637,7 @@ def quantize_cli(
     mlflow_uri: str = typer.Option(MLFLOW_URI_DEFAULT, help="AppMana MLflow tracking server."),
     experiment_name: str = typer.Option(MLFLOW_EXPERIMENT_DEFAULT, help="MLflow experiment name."),
     run_name: str = typer.Option("", help="Optional human-readable MLflow run name."),
+    mlflow_run_id: str = typer.Option("", help="Explicit MLflow run to resume."),
 ) -> None:
     _invoke(
         command_quantize,
@@ -652,6 +654,7 @@ def quantize_cli(
         mlflow_uri=mlflow_uri,
         experiment_name=experiment_name,
         run_name=run_name,
+        mlflow_run_id=mlflow_run_id,
     )
 
 
