@@ -205,6 +205,41 @@ deepcompressor-svdquant validate \
 
 The command exits with status 2 if any prompt misses the threshold.
 
+### Published Qwen-Image baseline
+
+Use the staged Qwen command to measure what raw-pixel agreement the published
+Nunchaku rank-32 checkpoint actually achieves. Prompt conditioning and initial
+noise are saved once, both variants return latents, and a separately loaded
+shared BF16 VAE decodes both sets. This prevents text-encoder, random-number,
+or VAE differences from being attributed to INT4.
+
+```bash
+deepcompressor-qwen-baseline encode \
+  --prompt-index 100 --prompt-index 2500 \
+  --prompt-index 5000 --prompt-index 7500 \
+  --gpu 1 --output runs/qwen-image-r32-baseline
+
+deepcompressor-qwen-baseline render-bf16 \
+  --output runs/qwen-image-r32-baseline \
+  --width 512 --height 512 --steps 30 --cfg 4 \
+  --gpu0-memory 13GiB --gpu1-memory 21GiB --cpu-memory 1GiB
+
+deepcompressor-qwen-baseline render-int4 \
+  --output runs/qwen-image-r32-baseline --gpu 1 \
+  --width 512 --height 512 --steps 30 --cfg 4
+
+deepcompressor-qwen-baseline decode \
+  --output runs/qwen-image-r32-baseline --gpu 1
+
+deepcompressor-qwen-baseline report \
+  --output runs/qwen-image-r32-baseline --threshold 0.99
+```
+
+The BF16 memory limits are machine-specific. Modules that exceed both GPUs and
+the CPU allowance are disk-offloaded under the run directory and loaded onto a
+GPU for computation. The report records the complete device map, so this
+constrained-system timing is never confused with a single-GPU kernel benchmark.
+
 Use prompts outside the calibration range for acceptance. For example, if
 prompts 0--99 supplied PTQ, validate on 100--199:
 
