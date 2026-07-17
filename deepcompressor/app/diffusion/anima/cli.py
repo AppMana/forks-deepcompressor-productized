@@ -101,6 +101,34 @@ def _weighted_partition(total: int, weights: list[float], rank: int) -> tuple[in
     return boundaries[rank], boundaries[rank + 1]
 
 
+def _wait_for_collection_shards(
+    shards: Path,
+    num_processes: int,
+    *,
+    timeout_seconds: float = 24 * 60 * 60,
+) -> list[dict]:
+    """Wait for atomically published collection metadata without a GPU collective.
+
+    Weighted prompt partitions intentionally take different amounts of time.
+    A final NCCL barrier uses the process-group timeout (ten minutes by default),
+    so a healthy slower rank can otherwise be killed after a faster rank finishes.
+    """
+
+    expected = [shards / f"rank-{rank:05d}.json" for rank in range(num_processes)]
+    deadline = time.monotonic() + timeout_seconds
+    last_missing: tuple[int, ...] | None = None
+    while True:
+        missing = tuple(rank for rank, path in enumerate(expected) if not path.is_file())
+        if not missing:
+            return [json.loads(path.read_text()) for path in expected]
+        if missing != last_missing:
+            print(json.dumps({"waiting_for_accelerate_ranks": list(missing)}), flush=True)
+            last_missing = missing
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Timed out waiting for collection metadata from Accelerate ranks {missing}")
+        time.sleep(1.0)
+
+
 def command_collect(args: SimpleNamespace) -> int:
     import torch
     from accelerate import PartialState
@@ -119,6 +147,10 @@ def command_collect(args: SimpleNamespace) -> int:
         raise FileExistsError(f"Collection output already contains a dataset: {output / 'hf_dataset'}")
     if state.is_main_process:
         shards.mkdir(parents=True, exist_ok=True)
+        # Shards describe one invocation. Remove incomplete/stale metadata
+        # before any rank begins so resume reconstructs it from validated files.
+        for path in (*shards.glob("rank-*.json"), *shards.glob(".rank-*.json.tmp")):
+            path.unlink()
     state.wait_for_everyone()
     prompts = load_prompt_dataset(args.prompts, args.num_prompts, args.prompt_offset)
     partition = None
@@ -156,12 +188,13 @@ def command_collect(args: SimpleNamespace) -> int:
             metadata["accelerate_device"] = str(state.device)
             metadata["accelerate_partition"] = partition
             shard_path = shards / f"rank-{state.process_index:05d}.json"
-            shard_path.write_text(json.dumps(metadata, indent=2) + "\n")
+            temporary_shard_path = shards / f".rank-{state.process_index:05d}.json.tmp"
+            temporary_shard_path.write_text(json.dumps(metadata, indent=2) + "\n")
+            temporary_shard_path.replace(shard_path)
         finally:
             components.close()
-    state.wait_for_everyone()
     if state.is_main_process:
-        shard_metadata = [json.loads(path.read_text()) for path in sorted(shards.glob("rank-*.json"))]
+        shard_metadata = _wait_for_collection_shards(shards, state.num_processes)
         manifest_path, metadata = save_calibration_manifest(output, shard_metadata)
         print(json.dumps({**metadata, "hf_dataset": str(manifest_path)}, indent=2))
     state.destroy_process_group()
