@@ -59,18 +59,35 @@ def solve_activation_aware_low_rank(
     covariance = covariance.to(device=device, dtype=solve_dtype)
     quantized_cross = quantized_cross.to(device=device, dtype=solve_dtype)
     covariance = (covariance + covariance.mT) * 0.5
-    diagonal_scale = covariance.diagonal().mean().abs().clamp_min(torch.finfo(solve_dtype).tiny)
-    diagonal = damping * diagonal_scale
-    # A tiny numerical floor keeps Cholesky defined when the sampled
-    # activation matrix is rank deficient. It is many orders below the
-    # configurable statistical damping.
-    numerical_floor = torch.finfo(solve_dtype).eps * covariance.shape[0] * diagonal_scale
-    regularized = covariance + torch.eye(in_features, device=device, dtype=solve_dtype) * torch.maximum(
-        diagonal, numerical_floor
+    if not torch.isfinite(covariance).all():
+        raise RuntimeError("Activation covariance contains non-finite values")
+    diagonal_values = covariance.diagonal()
+    diagonal_scale = diagonal_values.mean().abs().clamp_min(torch.finfo(solve_dtype).tiny)
+    # The sampled covariance is often singular: a 7,104-wide Anima MLP with
+    # 100 caches x 64 rows has rank at most 6,400. In FP32, a fixed damping
+    # value can still leave a nominally PSD matrix numerically indefinite.
+    # Start with the requested statistical damping, then increase only the
+    # diagonal regularizer until Cholesky succeeds.
+    numerical_floor = (
+        torch.finfo(solve_dtype).eps * covariance.shape[0] * diagonal_values.abs().amax().clamp_min(diagonal_scale)
     )
-    chol, info = torch.linalg.cholesky_ex(regularized)
-    if torch.any(info):
-        raise RuntimeError(f"Activation covariance Cholesky failed with info={info.max().item()}")
+    diagonal = torch.maximum(damping * diagonal_scale, numerical_floor)
+    regularized = covariance.clone()
+    regularized.diagonal().add_(diagonal)
+    max_cholesky_attempts = 8
+    for attempt in range(max_cholesky_attempts):
+        chol, info = torch.linalg.cholesky_ex(regularized)
+        if not torch.any(info):
+            break
+        if attempt == max_cholesky_attempts - 1:
+            raise RuntimeError(
+                "Activation covariance Cholesky failed after adaptive damping "
+                f"with info={info.max().item()} and diagonal={diagonal.item():.6g}"
+            )
+        next_diagonal = diagonal * 10
+        regularized.diagonal().add_(next_diagonal - diagonal)
+        diagonal = next_diagonal
+    del regularized, info
 
     # H = E[(W x - Q(W) q(x)) x.T]. If C = L L.T, then H L^-T is
     # the whitened unconstrained regression. Its rank-r SVD is the exact

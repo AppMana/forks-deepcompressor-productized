@@ -71,3 +71,30 @@ def test_activation_aware_solver_reduces_observed_w4a4_error() -> None:
     weight_only_error = (target - inputs @ weight_only.mT).square().mean()
 
     assert aware_error < weight_only_error
+
+
+def test_activation_aware_solver_adapts_damping_for_numerically_indefinite_covariance() -> None:
+    torch.manual_seed(19)
+    in_features, out_features, rank = 12, 8, 3
+    weight = torch.randn(out_features, in_features)
+    quantized_weight = torch.round(weight * 2) / 2
+    covariance = torch.eye(in_features)
+    # Model FP32 roundoff in a rank-deficient empirical covariance. The
+    # requested 1e-4 damping is too small for this final pivot, so a fixed
+    # regularizer fails while the adaptive factorization remains well posed.
+    covariance[-1, -1] = -5e-4
+    quantized_cross = covariance.clone()
+
+    branch = solve_activation_aware_low_rank(
+        weight,
+        quantized_weight,
+        covariance,
+        quantized_cross,
+        rank=rank,
+        damping=1e-4,
+        svd_mode="exact",
+        svd_oversample=8,
+        svd_niter=2,
+    )
+
+    assert torch.isfinite(branch.get_effective_weight()).all()

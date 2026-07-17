@@ -281,7 +281,11 @@ def command_quantize(args: SimpleNamespace) -> int:
         # file handler afterward so the tracking client cannot replace it.
         tools.logging.setup(path=str(output / "ptq.log"), level=tools.logging.INFO)
         tracker.save_reference(output / REFERENCE_FILENAME)
-        tracker.log_params(recipe)
+        # MLflow parameters are immutable. Cache reuse describes this
+        # execution attempt rather than the quantization recipe, so keep it as
+        # a mutable tag and allow a failed run to resume its completed stages.
+        tracker.log_params({key: value for key, value in recipe.items() if key != "resume"})
+        tracker.set_tags({"execution.resume": args.resume})
         tracker.log_artifact(recipe_path, artifact_path="recipe")
         total_started = time.perf_counter()
         try:
