@@ -81,8 +81,6 @@ class DiffusionCalibCacheLoaderConfig(BaseDataLoaderConfig):
 
 
 class DiffusionCalibDataset(DiffusionDataset):
-    data: list[dict[str, tp.Any]]
-
     def __init__(self, path: str, num_samples: int = -1, seed: int = 0) -> None:
         manifest_path = Path(path).expanduser().resolve()
         if (manifest_path / "dataset_info.json").is_file():
@@ -101,18 +99,22 @@ class DiffusionCalibDataset(DiffusionDataset):
             self.filepaths = [str(root / filename) for filename in self.filenames]
         else:
             super().__init__(str(manifest_path), num_samples=num_samples, seed=seed, ext=".pt")
-        # Calibration records contain structured forward kwargs rather than a
-        # weights-only state dict. PyTorch 2.6 changed torch.load's default;
-        # these are trusted, locally generated DeepCompressor cache files.
-        data = [torch.load(path, weights_only=False) for path in self.filepaths]
-        random.Random(seed).shuffle(data)
-        self.data = data
+
+        # Match the previous deterministic post-load shuffle without retaining
+        # every structured calibration record in host memory. DataLoader now
+        # reads one requested record at a time and can use worker prefetching.
+        pairs = list(zip(self.filenames, self.filepaths, strict=True))
+        random.Random(seed).shuffle(pairs)
+        self.filenames = [pair[0] for pair in pairs]
+        self.filepaths = [pair[1] for pair in pairs]
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self.filepaths)
 
     def __getitem__(self, idx) -> dict[str, tp.Any]:
-        return self.data[idx]
+        # Calibration records contain structured forward kwargs rather than a
+        # weights-only state dict. These are trusted, locally generated files.
+        return torch.load(self.filepaths[idx], weights_only=False)
 
 
 class DiffusionConcatCacheAction(ConcatCacheAction):

@@ -37,6 +37,9 @@ def build_anima_svdquant_config(
     num_iters: int = 100,
     num_workers: int = 0,
     fast: bool = False,
+    activation_aware: bool = False,
+    activation_damping: float = 1e-4,
+    activation_num_tokens: int = 64,
 ) -> DiffusionQuantConfig:
     """Build the paper-faithful W4A4 + BF16 low-rank PTQ configuration.
 
@@ -68,6 +71,9 @@ def build_anima_svdquant_config(
         svd_mode="randomized" if fast else "exact",
         svd_oversample=8,
         svd_niter=2,
+        activation_aware=activation_aware,
+        activation_damping=activation_damping,
+        activation_num_tokens=activation_num_tokens,
         skips=[],
     )
     weight_range = SkipBasedDynamicRangeCalibConfig(

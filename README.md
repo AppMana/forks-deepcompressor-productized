@@ -6,10 +6,10 @@ calibration trajectories, run the released SVDQuant post-training quantization (
 Nunchaku-compatible fused INT4 W4A4 + BF16 W16A16 checkpoint, and compare its decoded pixels and speed with the
 original BF16 model.
 
-The current implementation is a PTQ pipeline. It does **not** train its low-rank branch with backpropagation. The product
-target is to preserve DeepCompressor's existing blockwise calibration dataflow and `OutputsError` objective while
-replacing only its discrete low-rank candidate loop with SVD-initialized gradient optimization of the W16A16 branch.
-That calibrator is described below and is not yet exposed as a training command.
+The current implementation is a PTQ pipeline. It does **not** train its low-rank branch with backpropagation. Its default
+activation-aware solver replaces weight-only residual SVD with reduced-rank regression over real W4A4 calibration
+activations, while preserving DeepCompressor's block order, `OutputsError` selection, Nunchaku checkpoint layout, and
+inference kernels. The released weight-only SVD remains available as a control.
 
 ## Repository map
 
@@ -52,7 +52,8 @@ The AppMana fork currently provides:
    strict restart validation with `--resume`.
 5. A DeepCompressor model structure and paper-faithful signed INT4 group-64 recipe with rank-32 or rank-128 BF16
    low-rank branches.
-6. Economy exact SVD for production and deterministic randomized truncated SVD for smoke experiments.
+6. Economy exact SVD for production, deterministic randomized truncated SVD for smoke experiments, and activation-aware
+   reduced-rank regression that includes both W4 weight error and A4 activation error.
 7. Packing into the installed Nunchaku 1.3 checkpoint field names and replacement of native Anima attention/MLP
    projections with fused `SVDQW4A4Linear` operations.
 8. Raw RGB acceptance testing using `1 - RGB_RMSE`, with a required minimum of `0.99`, rather than DINO or another
@@ -63,8 +64,8 @@ The AppMana fork currently provides:
 
 The following is **not implemented yet**:
 
-- A gradient-based `QuantLowRankCalibrator` that streams the 10,000 selected timestep records and differentiates only
-  the W16A16 branch.
+- An optional gradient-based `QuantLowRankCalibrator` that differentiates only the W16A16 branch after activation-aware
+  initialization.
 - Gradient synchronization for low-rank factors across Accelerate/Kueue workers.
 - Progressive candidate re-ranking over a large PTQ calibration set.
 - A distributed PTQ error reduction inside DeepCompressor.
@@ -188,9 +189,14 @@ The current exact Anima recipe has these candidate bounds per calibrated project
 The fast Anima recipe uses one manual smoothing candidate and randomized SVD. `--num-iters` still controls residual
 passes.
 
+The product CLI defaults to `--activation-aware`. Each residual iteration solves one activation-aware candidate,
+requantizes `W - BA`, and lets the unchanged DeepCompressor `OutputsError` accept or reject it. Use `--weight-svd` to run
+the released candidate generator unchanged.
+
 Ten thousand examples do not imply ten thousand candidates. More examples reduce sampling error in candidate selection;
-they do not expand the candidate family or guarantee lower calibration error. The current dataset loader also eagerly
-loads selected cache files, so `quantize --num-samples 10000` is not a viable streaming implementation.
+they do not expand the candidate family or guarantee lower calibration error. The dataset loader now opens selected
+cache records lazily, while DeepCompressor retains only the activation cache required for the block currently being
+calibrated.
 
 ## Run the implemented PTQ baseline
 
@@ -211,7 +217,7 @@ Use the released calibration scale for the PTQ control, rather than trying to lo
 deepcompressor-svdquant quantize \
   --gpu 0 \
   --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/hf_dataset \
-  --num-samples 128 --rank 32 --num-iters 100 --resume \
+  --num-samples 128 --rank 32 --num-iters 100 --weight-svd --resume \
   --run-name anima-r32-exact-128samples \
   --output runs/anima-aesthetic-v1.1/anima-r32-exact-128samples
 ```
@@ -219,62 +225,54 @@ deepcompressor-svdquant quantize \
 `--resume` reuses completed DeepCompressor caches in the output directory. It is not a general mid-candidate distributed
 checkpoint.
 
-## Product target: differentiate DeepCompressor's low-rank calibration
+## Activation-aware W16A16 solver
 
-The intended method is not a new end-to-end distillation objective. It is a gradient-based version of the low-rank stage
-DeepCompressor already performs.
-
-The released [`QuantLowRankCalibrator`](deepcompressor/calib/lowrank.py), driven by
-[`SearchBasedCalibrator`](deepcompressor/calib/search.py), already does the following for each supported projection
-group:
-
-1. Receives cached inputs at real diffusion timesteps and guidance branches.
-2. Computes the BF16 output of the current `eval_module` once.
-3. Builds an SVD low-rank branch from the weight/quantization residual.
-4. Runs the W4A4 + W16A16 candidate through the same `eval_module`.
-5. Sums `OutputsError` over calibration records and uses that scalar to accept or reject the candidate.
-6. Commits the effective calibrated block before generating activation caches for the next block.
-
-The productized gradient path should retain steps 1, 2, 4, and 6 exactly. Only steps 3 and 5 change:
-
-1. Initialize rank-32 `A` and `B` once from the released residual SVD.
-2. Freeze W4 weights, activation/weight quantization parameters, smoothing parameters, and every non-low-rank model
-   parameter.
-3. Make only `LowRankBranch.a.weight` and `LowRankBranch.b.weight` trainable.
-4. Stream mini-batches from the same selected timestep records used by DeepCompressor.
-5. Backpropagate DeepCompressor's existing `OutputsError` into `A` and `B` and update them with an optimizer.
-6. Preserve DeepCompressor's ordered block propagation, then export the learned factors through the existing Nunchaku
-   packer as `proj_down` and `proj_up`.
-
-For the same `eval_module` and cached inputs `x_i`, the objective becomes:
+The implemented alternative changes only how DeepCompressor determines `LowRankBranch.a.weight` and
+`LowRankBranch.b.weight`. For original activation rows `X`, dynamically quantized rows `Q(X)`, original weight `W`, and
+the current quantized residual weight `Q(W)`, it accumulates:
 
 ```text
-minimize over A, B:
-  (1 / N) sum_i ||eval_module_W4A4+A,B(x_i) - eval_module_BF16(x_i)||²
+C = E[X.T @ X]
+K = E[Q(X).T @ X]
+H = W @ C - Q(W) @ K
 ```
 
-This is QAT-like because the quantized W4A4 branch participates in every forward pass, but only the BF16 low-rank branch
-is differentiated. It is not a pixel loss, it does not decode images during calibration, and it does not unroll the
-30-step sampler. Final latents and decoded raw pixels remain held-out acceptance measurements.
+It then solves the regularized reduced-rank regression:
 
-The W4 parameters are frozen and therefore need no weight gradient or straight-through estimator. The training forward
-does need activation gradients wherever the chosen `eval_module` contains multiple coupled projections. The first
-correct implementation should keep DeepCompressor's fake-quantized PyTorch module path, which can retain that autograd
-graph. Nunchaku remains the export and inference runtime; a Nunchaku/Triton backward is a later performance optimization,
-not a different calibration method.
+```text
+minimize over rank(L) <= r:
+  E[||W X - Q(W) Q(X) - L X||²] + damping * ||L||²
+```
 
-With `N=10,000`, global batch size `G`, and `K` epochs, the optimization takes approximately
-`K × ceil(N/G)` synchronized steps. Calibration records are data-parallel: each worker evaluates a disjoint mini-batch and
-Accelerate/DDP all-reduces only the low-rank gradients. Blocks remain ordered because a calibrated block changes the
-inputs seen by the next block.
+If `C + damping*I = chol @ chol.T`, the whitened unconstrained correction is `H @ chol^-T`. A rank-32 or rank-128 SVD of
+that matrix, transformed back by `chol^-1`, gives `L = B @ A`. The factors have the same shapes and meaning as released
+SVDQuant and are exported through the unchanged Nunchaku `proj_down`/`proj_up` fields.
 
-The recommended experiment order is:
+The covariance and original/quantized cross-covariance are computed once per projection group. By default, 64 uniformly
+spaced activation rows are taken from each cached tensor, so every calibration batch contributes without materializing
+all spatial tokens. `--activation-num-tokens -1` uses every row. The dataset itself now loads selected records lazily;
+DeepCompressor still materializes the current block's activation cache because its blockwise calibration requires it.
 
-1. Reproduce the exact 128-sample released PTQ control.
-2. Prove the gradient-based `OutputsError` calibrator on 100 prompts for 20 epochs.
-3. Confirm in MLflow that training/held-out `OutputsError` decreases and held-out raw-pixel similarity improves.
-4. Stream all 10,000 selected records with rank 32 and data-parallel low-rank optimization.
-5. Compare rank 32 with rank 128 only after the rank-32 curve and runtime are understood.
+After each solve, DeepCompressor requantizes `W - L`, evaluates its unchanged full `OutputsError`, and keeps the best
+iteration. Thus the local closed-form regression proposes candidates and the existing module-level objective selects
+them. Blocks remain ordered, and the checkpoint/runtime path is identical to the weight-SVD control.
+
+Run a bounded rank-32 pilot first:
+
+```bash
+deepcompressor-svdquant quantize \
+  --gpu 0 \
+  --dataset runs/anima-aesthetic-v1.1/aesthetic-v1.1-calibration-10000prompts/hf_dataset \
+  --num-samples 100 --rank 32 --num-iters 4 --fast --activation-aware \
+  --activation-damping 1e-4 --activation-num-tokens 64 --resume \
+  --run-name anima-r32-aware-100samples-4iter \
+  --output runs/anima-aesthetic-v1.1/anima-r32-aware-100samples-4iter
+```
+
+MLflow records `low_rank_solver=activation-aware-rrr`, damping, token sampling, sample count, rank, and iteration count.
+If the pilot improves held-out raw pixels, increase the sample count while keeping those controls explicit. A later
+gradient-only polish of `A/B` can use the same DeepCompressor `OutputsError`, but it is not required by this solver and is
+not implemented yet.
 
 ## Validate raw pixels
 

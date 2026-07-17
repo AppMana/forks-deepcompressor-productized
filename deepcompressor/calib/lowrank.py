@@ -6,6 +6,7 @@ from dataclasses import _MISSING_TYPE, MISSING
 import torch
 import torch.nn as nn
 
+from ..data.cache import TensorCache, TensorsCache
 from ..data.common import TensorType
 from ..nn.patch.lowrank import LowRankBranch
 from ..quantizer.processor import Quantizer
@@ -14,7 +15,91 @@ from ..utils.config import KeyEnableConfig
 from .config import QuantLowRankCalibConfig, SearchBasedCalibObjective
 from .search import SearchBasedCalibrator
 
-__all__ = ["QuantLowRankCalibrator"]
+__all__ = ["QuantLowRankCalibrator", "solve_activation_aware_low_rank"]
+
+
+@torch.no_grad()
+def solve_activation_aware_low_rank(
+    weight: torch.Tensor,
+    quantized_weight: torch.Tensor,
+    covariance: torch.Tensor,
+    quantized_cross: torch.Tensor,
+    *,
+    rank: int,
+    damping: float,
+    svd_mode: str,
+    svd_oversample: int,
+    svd_niter: int,
+) -> LowRankBranch:
+    """Solve the activation-aware reduced-rank W16A16 correction.
+
+    ``covariance`` is E[x.T @ x] and ``quantized_cross`` is
+    E[q(x).T @ x]. The target correction therefore includes both W4 and A4
+    error: ``W @ x - Q(W) @ q(x)``.
+    """
+
+    if weight.ndim < 2 or quantized_weight.shape != weight.shape:
+        raise ValueError("Activation-aware weights must have matching matrix shapes")
+    weight = weight.view(weight.shape[0], -1)
+    quantized_weight = quantized_weight.view(quantized_weight.shape[0], -1)
+    in_features = weight.shape[1]
+    expected = (in_features, in_features)
+    if covariance.shape != expected or quantized_cross.shape != expected:
+        raise ValueError(
+            f"Activation statistics must both have shape {expected}, got "
+            f"{tuple(covariance.shape)} and {tuple(quantized_cross.shape)}"
+        )
+    if rank <= 0 or rank > min(weight.shape):
+        raise ValueError(f"Activation-aware rank must be in 1..{min(weight.shape)}, got {rank}")
+    if damping < 0:
+        raise ValueError("Activation-aware damping must be non-negative")
+
+    device, output_dtype = weight.device, weight.dtype
+    solve_dtype = covariance.dtype
+    covariance = covariance.to(device=device, dtype=solve_dtype)
+    quantized_cross = quantized_cross.to(device=device, dtype=solve_dtype)
+    covariance = (covariance + covariance.mT) * 0.5
+    diagonal_scale = covariance.diagonal().mean().abs().clamp_min(torch.finfo(solve_dtype).tiny)
+    diagonal = damping * diagonal_scale
+    # A tiny numerical floor keeps Cholesky defined when the sampled
+    # activation matrix is rank deficient. It is many orders below the
+    # configurable statistical damping.
+    numerical_floor = torch.finfo(solve_dtype).eps * covariance.shape[0] * diagonal_scale
+    regularized = covariance + torch.eye(in_features, device=device, dtype=solve_dtype) * torch.maximum(
+        diagonal, numerical_floor
+    )
+    chol, info = torch.linalg.cholesky_ex(regularized)
+    if torch.any(info):
+        raise RuntimeError(f"Activation covariance Cholesky failed with info={info.max().item()}")
+
+    # H = E[(W x - Q(W) q(x)) x.T]. If C = L L.T, then H L^-T is
+    # the whitened unconstrained regression. Its rank-r SVD is the exact
+    # reduced-rank solution under the regularized activation metric.
+    weight = weight.to(dtype=solve_dtype)
+    quantized_weight = quantized_weight.to(dtype=solve_dtype)
+    cross_output_input = weight @ covariance - quantized_weight @ quantized_cross
+    whitened = torch.linalg.solve_triangular(chol, cross_output_input.mT, upper=False).mT
+    branch = LowRankBranch(
+        in_features,
+        weight.shape[0],
+        rank=rank,
+        weight=whitened,
+        svd_mode=svd_mode,
+        svd_oversample=svd_oversample,
+        svd_niter=svd_niter,
+    )
+    # branch.a currently contains Vh for the whitened solution. Convert
+    # Vh @ L^-1 back to the original activation coordinates; branch.b is
+    # already U @ S.
+    original_dtype = branch.a.weight.dtype
+    transformed_a = torch.linalg.solve_triangular(
+        chol.mT,
+        branch.a.weight.to(dtype=solve_dtype).mT,
+        upper=True,
+    ).mT
+    branch.a.weight.copy_(transformed_a.to(dtype=original_dtype))
+    branch.to(device=device, dtype=output_dtype)
+    return branch
 
 
 class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowRankBranch]):
@@ -77,7 +162,12 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
         """Check if the current iteration is the last one."""
         return self.iter == self.num_iters - 1
 
-    def _reset(self, x_wgts: list[torch.Tensor | nn.Parameter], **kwargs) -> None:  # noqa: C901
+    def _reset(
+        self,
+        x_wgts: list[torch.Tensor | nn.Parameter],
+        x_acts: TensorsCache | None = None,
+        **kwargs,
+    ) -> None:  # noqa: C901
         """Reset the calibrator.
 
         Args:
@@ -93,6 +183,15 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
         else:
             assert len(x_wgts) == 1
             self.w = x_wgts[0].data
+        self.hat_ws: list[torch.Tensor] = [None] * len(x_wgts)
+        self.ocs: list[int] = [wgt.shape[0] for wgt in x_wgts]
+        self.activation_cache: TensorCache | None = None
+        self.activation_covariance: torch.Tensor | None = None
+        self.quantized_cross: torch.Tensor | None = None
+        if self.config.activation_aware:
+            if not isinstance(x_acts, TensorsCache) or x_acts.num_tensors != 1:
+                raise ValueError("Activation-aware low-rank calibration requires exactly one input activation cache")
+            self.activation_cache = x_acts.front()
         if self.config.compensate:
             self.qw = torch.cat(
                 [
@@ -103,8 +202,98 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
             )
         else:
             self.qw = 0
-        self.hat_ws: list[torch.Tensor] = [None] * len(x_wgts)
-        self.ocs: list[int] = [wgt.shape[0] for wgt in x_wgts]
+            if self.config.activation_aware:
+                # Preserve SVDQuant's weight-SVD initialization. The first
+                # activation-aware iteration improves this initialized W4
+                # residual rather than quantizing the original W directly.
+                initial = LowRankBranch(
+                    self.w.shape[1],
+                    self.w.shape[0],
+                    rank=self.config.rank,
+                    weight=self.w,
+                    svd_mode=self.config.svd_mode,
+                    svd_oversample=self.config.svd_oversample,
+                    svd_niter=self.config.svd_niter,
+                )
+                self._update_quantized_weights(initial)
+
+    def _update_quantized_weights(self, branch: LowRankBranch) -> None:
+        """Quantize the W4 residual represented alongside ``branch``."""
+
+        lw = branch.get_effective_weight().view(self.w.shape)
+        rw = self.w - lw
+        if len(self.hat_ws) > 1:
+            oc_idx = 0
+            for idx, oc in enumerate(self.ocs):
+                self.hat_ws[idx] = self.w_quantizer.quantize(
+                    rw[oc_idx : oc_idx + oc], kernel=None, develop_dtype=self.develop_dtype
+                ).data
+                oc_idx += oc
+            self.qw = torch.cat(self.hat_ws, dim=0)
+            if self.objective != SearchBasedCalibObjective.OutputsError:
+                oc_idx = 0
+                for idx, oc in enumerate(self.ocs):
+                    self.hat_ws[idx].add_(lw[oc_idx : oc_idx + oc])
+                    oc_idx += oc
+        else:
+            self.qw = self.w_quantizer.quantize(rw, kernel=None, develop_dtype=self.develop_dtype).data
+            self.hat_ws = [self.qw if self.objective == SearchBasedCalibObjective.OutputsError else self.qw + lw]
+
+    def _reshape_activation(self, cache: TensorCache, tensor: torch.Tensor) -> torch.Tensor:
+        channels_dim = cache.channels_dim % tensor.ndim
+        tensor = tensor.view(-1, *tensor.shape[channels_dim:])
+        tensor = cache.reshape(tensor)
+        if tensor.ndim != 2 or tensor.shape[1] != self.w.shape[1]:
+            raise ValueError(
+                f"Activation-aware input expected a 2D matrix with {self.w.shape[1]} columns, got {tuple(tensor.shape)}"
+            )
+        return tensor
+
+    def _get_activation_statistics(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Accumulate E[x.T x] and E[q(x).T x] once for this group."""
+
+        if self.activation_covariance is not None and self.quantized_cross is not None:
+            return self.activation_covariance, self.quantized_cross
+        if self.activation_cache is None:
+            raise RuntimeError("Activation-aware calibration has no activation cache")
+        device = self.w.device
+        stats_dtype = self.develop_dtype if self.develop_dtype in {torch.float32, torch.float64} else torch.float32
+        in_features = self.w.shape[1]
+        covariance = torch.zeros((in_features, in_features), device=device, dtype=stats_dtype)
+        quantized_cross = torch.zeros_like(covariance)
+        num_rows = 0
+        for tensor in self.activation_cache.data:
+            tensor = tensor.to(device=device, non_blocking=True)
+            quantized = self._process_x_in_xw(tensor, channels_dim=self.activation_cache.channels_dim)
+            tensor = self._reshape_activation(self.activation_cache, tensor)
+            quantized = self._reshape_activation(self.activation_cache, quantized)
+            max_tokens = self.config.activation_num_tokens
+            if max_tokens > 0 and tensor.shape[0] > max_tokens:
+                indexes = torch.div(
+                    torch.arange(max_tokens, device=device) * tensor.shape[0],
+                    max_tokens,
+                    rounding_mode="floor",
+                )
+                tensor = tensor.index_select(0, indexes)
+                quantized = quantized.index_select(0, indexes)
+            tensor = tensor.to(dtype=stats_dtype)
+            quantized = quantized.to(dtype=stats_dtype)
+            covariance.addmm_(tensor.mT, tensor)
+            quantized_cross.addmm_(quantized.mT, tensor)
+            num_rows += tensor.shape[0]
+        if num_rows == 0:
+            raise RuntimeError("Activation-aware calibration selected no activation rows")
+        count = torch.tensor(float(num_rows), device=device, dtype=stats_dtype)
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(covariance)
+            torch.distributed.all_reduce(quantized_cross)
+            torch.distributed.all_reduce(count)
+        covariance.div_(count)
+        quantized_cross.div_(count)
+        self.logger.debug("  - activation rows = %d", int(count.item()))
+        self.activation_covariance = covariance
+        self.quantized_cross = quantized_cross
+        return covariance, quantized_cross
 
     def get_best(self) -> LowRankBranch:
         """Get the best candidate.
@@ -122,38 +311,31 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
             `LowRankBranch`:
                 The next candidate.
         """
-        branch = LowRankBranch(
-            self.w.shape[1],
-            self.w.shape[0],
-            rank=self.config.rank,
-            weight=self.w - self.qw,
-            svd_mode=self.config.svd_mode,
-            svd_oversample=self.config.svd_oversample,
-            svd_niter=self.config.svd_niter,
-        )
-        self.wgt_idx = 0
-        if len(self.hat_ws) > 1:
-            lw = branch.get_effective_weight().view(self.w.shape)
-            rw = self.w - lw
-            oc_idx = 0
-            for idx, oc in enumerate(self.ocs):
-                self.hat_ws[idx] = self.w_quantizer.quantize(
-                    rw[oc_idx : oc_idx + oc], kernel=None, develop_dtype=self.develop_dtype
-                ).data
-                oc_idx += oc
-            self.qw = torch.cat(self.hat_ws, dim=0)
-            if self.objective != SearchBasedCalibObjective.OutputsError:
-                oc_idx = 0
-                for idx, oc in enumerate(self.ocs):
-                    self.hat_ws[idx].add_(lw[oc_idx : oc_idx + oc])
-                    oc_idx += oc
+        if self.config.activation_aware:
+            covariance, quantized_cross = self._get_activation_statistics()
+            branch = solve_activation_aware_low_rank(
+                self.w,
+                self.qw,
+                covariance,
+                quantized_cross,
+                rank=self.config.rank,
+                damping=self.config.activation_damping,
+                svd_mode=self.config.svd_mode,
+                svd_oversample=self.config.svd_oversample,
+                svd_niter=self.config.svd_niter,
+            )
         else:
-            lw = branch.get_effective_weight().view(self.w.shape)
-            self.qw = self.w_quantizer.quantize(self.w - lw, kernel=None, develop_dtype=self.develop_dtype).data
-            if self.objective != SearchBasedCalibObjective.OutputsError:
-                self.hat_ws = [self.qw + lw]
-            else:
-                self.hat_ws = [self.qw]
+            branch = LowRankBranch(
+                self.w.shape[1],
+                self.w.shape[0],
+                rank=self.config.rank,
+                weight=self.w - self.qw,
+                svd_mode=self.config.svd_mode,
+                svd_oversample=self.config.svd_oversample,
+                svd_niter=self.config.svd_niter,
+            )
+        self.wgt_idx = 0
+        self._update_quantized_weights(branch)
         return branch
 
     def _tell(self, error: list[torch.Tensor]) -> None:  # noqa: C901

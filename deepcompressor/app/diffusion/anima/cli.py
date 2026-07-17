@@ -211,6 +211,9 @@ def command_quantize(args: SimpleNamespace) -> int:
         "svd_mode": "randomized" if args.fast else "exact",
         "svd_oversample": 8,
         "svd_power_iterations": 2,
+        "low_rank_solver": "activation-aware-rrr" if args.activation_aware else "weight-svd",
+        "activation_damping": args.activation_damping if args.activation_aware else "",
+        "activation_tokens_per_cache": args.activation_num_tokens if args.activation_aware else "",
         "weight_dtype": "sint4",
         "activation_dtype": "sint4",
         "group_size": 64,
@@ -233,7 +236,12 @@ def command_quantize(args: SimpleNamespace) -> int:
         experiment_name=args.experiment_name,
         run_name=args.run_name,
         run_id=args.mlflow_run_id,
-        tags={"stage": "quantize", "recipe.fast": args.fast, "recipe.rank": args.rank},
+        tags={
+            "stage": "quantize",
+            "recipe.fast": args.fast,
+            "recipe.rank": args.rank,
+            "recipe.low_rank_solver": recipe["low_rank_solver"],
+        },
     )
     with tracker:
         # MLflow initializes Python logging on import. Install DeepCompressor's
@@ -257,6 +265,9 @@ def command_quantize(args: SimpleNamespace) -> int:
                 num_samples=args.num_samples,
                 num_iters=args.num_iters,
                 fast=args.fast,
+                activation_aware=args.activation_aware,
+                activation_damping=args.activation_damping,
+                activation_num_tokens=args.activation_num_tokens,
             )
             phase_started = time.perf_counter()
             ptq(
@@ -669,6 +680,21 @@ def quantize_cli(
         "--fast",
         help="Use one smoothing candidate and randomized truncated SVD passes.",
     ),
+    activation_aware: bool = typer.Option(
+        True,
+        "--activation-aware/--weight-svd",
+        help="Fit the W16A16 branch to W4A4 activation error; use --weight-svd for the released control.",
+    ),
+    activation_damping: float = typer.Option(
+        1e-4,
+        min=0.0,
+        help="Relative diagonal damping for activation-aware covariance factorization.",
+    ),
+    activation_num_tokens: int = typer.Option(
+        64,
+        min=-1,
+        help="Activation rows sampled per cached tensor; -1 uses every row.",
+    ),
     resume: bool = typer.Option(
         False,
         "--resume",
@@ -690,6 +716,9 @@ def quantize_cli(
         num_iters=num_iters,
         output=output,
         fast=fast,
+        activation_aware=activation_aware,
+        activation_damping=activation_damping,
+        activation_num_tokens=activation_num_tokens,
         resume=resume,
         track=track,
         mlflow_uri=mlflow_uri,

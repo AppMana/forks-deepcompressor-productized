@@ -39,6 +39,12 @@ class QuantLowRankCalibConfig(SearchBasedCalibConfig, QuantLowRankConfig):
             The number of iterations.
         early_stop (`bool`, *optional*, default=`False`):
             Whether to stop the calibration early.
+        activation_aware (`bool`, *optional*, default=`False`):
+            Whether to solve each low-rank branch with calibration activation statistics.
+        activation_damping (`float`, *optional*, default=`1e-4`):
+            Relative diagonal damping for activation covariance factorization.
+        activation_num_tokens (`int`, *optional*, default=`64`):
+            Deterministically sampled activation rows per cached tensor, or -1 for all rows.
     """
 
     granularity: SearchBasedCalibGranularity = field(init=False, default=SearchBasedCalibGranularity.Layer)
@@ -50,6 +56,9 @@ class QuantLowRankCalibConfig(SearchBasedCalibConfig, QuantLowRankConfig):
     svd_mode: str = "exact"
     svd_oversample: int = 8
     svd_niter: int = 2
+    activation_aware: bool = False
+    activation_damping: float = 1e-4
+    activation_num_tokens: int = 64
 
     def __post_init__(self):
         if self.svd_mode not in {"exact", "randomized"}:
@@ -58,6 +67,10 @@ class QuantLowRankCalibConfig(SearchBasedCalibConfig, QuantLowRankConfig):
             raise ValueError("SVD oversampling must be non-negative")
         if self.svd_niter < 0:
             raise ValueError("SVD power iterations must be non-negative")
+        if self.activation_damping < 0:
+            raise ValueError("Activation-aware damping must be non-negative")
+        if self.activation_num_tokens == 0 or self.activation_num_tokens < -1:
+            raise ValueError("Activation-aware token count must be -1 or positive")
         if self.strategy != SearchBasedCalibStrategy.Manual:
             self.strategy = SearchBasedCalibStrategy.GridSearch
         if self.compensate and self.num_iters <= 1:
@@ -80,6 +93,8 @@ class QuantLowRankCalibConfig(SearchBasedCalibConfig, QuantLowRankConfig):
             name += ".earlystop"
         if self.svd_mode != "exact":
             name += f".{self.svd_mode}.o{self.svd_oversample}.p{self.svd_niter}"
+        if self.activation_aware:
+            name += f".aware.d{num2str(self.activation_damping)}.t{num2str(self.activation_num_tokens)}"
         names.append(name)
         if prefix:
             names = [f"{prefix}.{name}" for name in names]
@@ -112,6 +127,12 @@ class SkipBasedQuantLowRankCalibConfig(SkipBasedConfig, QuantLowRankCalibConfig)
             The number of iterations.
         early_stop (`bool`, *optional*, default=`False`):
             Whether to stop the calibration early.
+        activation_aware (`bool`, *optional*, default=`False`):
+            Whether to solve each low-rank branch with calibration activation statistics.
+        activation_damping (`float`, *optional*, default=`1e-4`):
+            Relative diagonal damping for activation covariance factorization.
+        activation_num_tokens (`int`, *optional*, default=`64`):
+            Deterministically sampled activation rows per cached tensor, or -1 for all rows.
         skips (`list[str]`, *optional*, default=`[]`):
             The keys of the modules to skip.
     """
