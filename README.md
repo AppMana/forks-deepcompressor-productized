@@ -6,9 +6,10 @@ calibration trajectories, run the released SVDQuant post-training quantization (
 Nunchaku-compatible fused INT4 W4A4 + BF16 W16A16 checkpoint, and compare its decoded pixels and speed with the
 original BF16 model.
 
-The current implementation is a PTQ pipeline. It does **not** train its low-rank branch with backpropagation. A
-teacher-forced, SVD-initialized low-rank QAT extension is the intended next step for making all 10,000 calibration
-examples actively improve the branch; that design is described below and is not yet exposed as a training command.
+The current implementation is a PTQ pipeline. It does **not** train its low-rank branch with backpropagation. The product
+target is to preserve DeepCompressor's existing blockwise calibration dataflow and `OutputsError` objective while
+replacing only its discrete low-rank candidate loop with SVD-initialized gradient optimization of the W16A16 branch.
+That calibrator is described below and is not yet exposed as a training command.
 
 ## Repository map
 
@@ -62,7 +63,8 @@ The AppMana fork currently provides:
 
 The following is **not implemented yet**:
 
-- Streaming low-rank QAT over the 10,000 selected timestep records.
+- A gradient-based `QuantLowRankCalibrator` that streams the 10,000 selected timestep records and differentiates only
+  the W16A16 branch.
 - Gradient synchronization for low-rank factors across Accelerate/Kueue workers.
 - Progressive candidate re-ranking over a large PTQ calibration set.
 - A distributed PTQ error reduction inside DeepCompressor.
@@ -217,58 +219,62 @@ deepcompressor-svdquant quantize \
 `--resume` reuses completed DeepCompressor caches in the output directory. It is not a general mid-candidate distributed
 checkpoint.
 
-## The intended 10,000-example low-rank QAT extension
+## Product target: differentiate DeepCompressor's low-rank calibration
 
-The original AppMana idea is valid, but it is an extension to SVDQuant rather than the released algorithm:
+The intended method is not a new end-to-end distillation objective. It is a gradient-based version of the low-rank stage
+DeepCompressor already performs.
 
-1. Build the W4A4 main branch and initialize rank-32 `A` and `B` from the released residual SVD.
-2. Freeze INT4 weights, quantization scales, smoothing parameters, the text encoder, and the VAE.
-3. Stream one stratified cached timestep/guidance record per prompt.
-4. Produce a BF16 teacher denoiser or block output for that record.
-5. Run the W4A4 + W16A16 student and minimize teacher/student output error.
-6. Backpropagate only into the low-rank `A` and `B` parameters.
-7. Data-parallelize records with Accelerate/DDP; all-reduce the small low-rank gradients.
-8. Export `A` and `B` through the existing Nunchaku packer as `proj_down` and `proj_up`.
-9. Use held-out end-to-end BF16 versus INT4 raw pixels—not the training loss—as acceptance.
+The released [`QuantLowRankCalibrator`](deepcompressor/calib/lowrank.py), driven by
+[`SearchBasedCalibrator`](deepcompressor/calib/search.py), already does the following for each supported projection
+group:
 
-The continuous optimization is:
+1. Receives cached inputs at real diffusion timesteps and guidance branches.
+2. Computes the BF16 output of the current `eval_module` once.
+3. Builds an SVD low-rank branch from the weight/quantization residual.
+4. Runs the W4A4 + W16A16 candidate through the same `eval_module`.
+5. Sums `OutputsError` over calibration records and uses that scalar to accept or reject the candidate.
+6. Commits the effective calibrated block before generating activation caches for the next block.
+
+The productized gradient path should retain steps 1, 2, 4, and 6 exactly. Only steps 3 and 5 change:
+
+1. Initialize rank-32 `A` and `B` once from the released residual SVD.
+2. Freeze W4 weights, activation/weight quantization parameters, smoothing parameters, and every non-low-rank model
+   parameter.
+3. Make only `LowRankBranch.a.weight` and `LowRankBranch.b.weight` trainable.
+4. Stream mini-batches from the same selected timestep records used by DeepCompressor.
+5. Backpropagate DeepCompressor's existing `OutputsError` into `A` and `B` and update them with an optimizer.
+6. Preserve DeepCompressor's ordered block propagation, then export the learned factors through the existing Nunchaku
+   packer as `proj_down` and `proj_up`.
+
+For the same `eval_module` and cached inputs `x_i`, the objective becomes:
 
 ```text
 minimize over A, B:
-  (1 / N) sum_i ||f_W4A4+A,B(x_i, timestep_i, conditioning_i)
-                   - f_BF16(x_i, timestep_i, conditioning_i)||²
+  (1 / N) sum_i ||eval_module_W4A4+A,B(x_i) - eval_module_BF16(x_i)||²
 ```
 
-Because the W4A4 weights and scales are frozen, they do not need a straight-through estimator. Each mini-batch gives an
-unbiased stochastic gradient for the trainable low-rank factors. The candidate-search count disappears; the relevant
-controls become learning rate, global batch size, optimizer, number of epochs, and held-out checkpoint selection.
+This is QAT-like because the quantized W4A4 branch participates in every forward pass, but only the BF16 low-rank branch
+is differentiated. It is not a pixel loss, it does not decode images during calibration, and it does not unroll the
+30-step sampler. Final latents and decoded raw pixels remain held-out acceptance measurements.
 
-This is teacher-forced QAT/distillation. Each example requires one denoiser or local-block evaluation; there is no need to
-backpropagate through the complete 30-step sampler. With `N=10,000`, global batch size `G`, and `K` epochs, its optimizer
-step count is approximately `K × ceil(N/G)`, not `139 × N` candidate evaluations.
+The W4 parameters are frozen and therefore need no weight gradient or straight-through estimator. The training forward
+does need activation gradients wherever the chosen `eval_module` contains multiple coupled projections. The first
+correct implementation should keep DeepCompressor's fake-quantized PyTorch module path, which can retain that autograd
+graph. Nunchaku remains the export and inference runtime; a Nunchaku/Triton backward is a later performance optimization,
+not a different calibration method.
 
-For blockwise training with detached inputs, the fused INT4 result can be treated as a constant and PyTorch only needs
-the ordinary BF16 low-rank backward. Full-denoiser joint training also needs gradients with respect to intermediate
-activations; the first correct implementation should use fake-quantized PyTorch operations, followed by a custom
-Nunchaku/Triton backward optimization if profiling justifies it.
-
-There is also a non-gradient activation-aware alternative. For a fixed INT4 residual `R = W - Q(W)` and activation matrix
-`X`, the local objective is:
-
-```text
-minimize over rank(Delta) <= r: ||(R - Delta) X||²_F
-```
-
-This is an activation-weighted low-rank approximation. Activation covariance or a randomized sketch can be accumulated
-across all 10,000 examples and all-reduced, then solved without replaying a grid of candidates. It should be tested as a
-cheap initialization/control, but it is not implemented by released DeepCompressor or this fork yet.
+With `N=10,000`, global batch size `G`, and `K` epochs, the optimization takes approximately
+`K × ceil(N/G)` synchronized steps. Calibration records are data-parallel: each worker evaluates a disjoint mini-batch and
+Accelerate/DDP all-reduces only the low-rank gradients. Blocks remain ordered because a calibrated block changes the
+inputs seen by the next block.
 
 The recommended experiment order is:
 
-1. Reproduce the exact 128-sample PTQ control.
-2. Prove QAT on 100 prompts for 20 epochs and verify that held-out one-step error and raw-pixel similarity improve.
-3. Stream all 10,000 selected records with rank 32, data-parallel training, and checkpoint selection by held-out error.
-4. Compare rank 32 with rank 128 only after the rank-32 training curve is understood.
+1. Reproduce the exact 128-sample released PTQ control.
+2. Prove the gradient-based `OutputsError` calibrator on 100 prompts for 20 epochs.
+3. Confirm in MLflow that training/held-out `OutputsError` decreases and held-out raw-pixel similarity improves.
+4. Stream all 10,000 selected records with rank 32 and data-parallel low-rank optimization.
+5. Compare rank 32 with rank 128 only after the rank-32 curve and runtime are understood.
 
 ## Validate raw pixels
 
