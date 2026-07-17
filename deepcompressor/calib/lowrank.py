@@ -254,7 +254,8 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
 
         if self.activation_covariance is not None and self.quantized_cross is not None:
             return self.activation_covariance, self.quantized_cross
-        if self.activation_cache is None:
+        activation_cache = self.activation_cache
+        if activation_cache is None:
             raise RuntimeError("Activation-aware calibration has no activation cache")
         device = self.w.device
         stats_dtype = self.develop_dtype if self.develop_dtype in {torch.float32, torch.float64} else torch.float32
@@ -262,11 +263,11 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
         covariance = torch.zeros((in_features, in_features), device=device, dtype=stats_dtype)
         quantized_cross = torch.zeros_like(covariance)
         num_rows = 0
-        for tensor in self.activation_cache.data:
+        for tensor in activation_cache.data:
             tensor = tensor.to(device=device, non_blocking=True)
-            quantized = self._process_x_in_xw(tensor, channels_dim=self.activation_cache.channels_dim)
-            tensor = self._reshape_activation(self.activation_cache, tensor)
-            quantized = self._reshape_activation(self.activation_cache, quantized)
+            quantized = self._process_x_in_xw(tensor, channels_dim=activation_cache.channels_dim)
+            tensor = self._reshape_activation(activation_cache, tensor)
+            quantized = self._reshape_activation(activation_cache, quantized)
             max_tokens = self.config.activation_num_tokens
             if max_tokens > 0 and tensor.shape[0] > max_tokens:
                 indexes = torch.div(
@@ -293,6 +294,10 @@ class QuantLowRankCalibrator(SearchBasedCalibrator[QuantLowRankCalibConfig, LowR
         self.logger.debug("  - activation rows = %d", int(count.item()))
         self.activation_covariance = covariance
         self.quantized_cross = quantized_cross
+        # The solver only needs these sufficient statistics after the first
+        # pass. Do not extend the lifetime of the potentially large block
+        # activation cache through all residual-SVD iterations.
+        self.activation_cache = None
         return covariance, quantized_cross
 
     def get_best(self) -> LowRankBranch:

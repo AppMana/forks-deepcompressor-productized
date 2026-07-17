@@ -3,6 +3,7 @@
 
 import functools
 import gc
+import os
 import typing as tp
 from abc import ABC, abstractmethod
 from collections import OrderedDict
@@ -23,6 +24,49 @@ from ..utils.hooks import EarlyStopException, EarlyStopHook, Hook
 from .action import CacheAction
 
 __all__ = ["BaseCalibCacheLoader"]
+
+
+_GIB = 1024**3
+_DEFAULT_MIN_AVAILABLE_MEMORY_GIB = 4.0
+
+
+def _check_memory_headroom(
+    context: str,
+    *,
+    memory: tp.Any | None = None,
+    minimum_available_gib: float | None = None,
+) -> tp.Any:
+    """Raise only when the host has too little reclaimable memory left.
+
+    A percentage-of-total guard is not a process safety boundary: unrelated
+    VMs and desktop applications can keep a large workstation above an
+    arbitrary percentage while many GiB remain available.  Linux
+    ``MemAvailable`` accounts for reclaimable cache and is the appropriate
+    signal for whether another calibration allocation is unsafe.
+    """
+
+    memory = memory or psutil.virtual_memory()
+    if minimum_available_gib is None:
+        raw_minimum = os.environ.get(
+            "DEEPCOMPRESSOR_MIN_AVAILABLE_MEMORY_GIB",
+            str(_DEFAULT_MIN_AVAILABLE_MEMORY_GIB),
+        )
+        try:
+            minimum_available_gib = float(raw_minimum)
+        except ValueError as exc:
+            raise ValueError(
+                f"DEEPCOMPRESSOR_MIN_AVAILABLE_MEMORY_GIB must be a non-negative number, got {raw_minimum!r}"
+            ) from exc
+    if minimum_available_gib < 0:
+        raise ValueError("minimum available memory must be non-negative")
+    minimum_available = int(minimum_available_gib * _GIB)
+    if memory.available < minimum_available:
+        raise RuntimeError(
+            f"available host memory fell below the safety headroom while {context}: "
+            f"{memory.available / _GIB:.2f} GiB available, {minimum_available_gib:.2f} GiB required; "
+            "set DEEPCOMPRESSOR_MIN_AVAILABLE_MEMORY_GIB to tune the guard"
+        )
+    return memory
 
 
 class BaseCalibCacheLoader(ABC):
@@ -328,9 +372,10 @@ class BaseCalibCacheLoader(ABC):
                     except EarlyStopException:
                         pass
                     tbar.update(self.batch_size)
-                    tbar.set_postfix({"ram usage": psutil.virtual_memory().percent})
-                    if psutil.virtual_memory().percent > 90:
-                        raise RuntimeError("memory usage > 90%%, aborting")
+                    memory = _check_memory_headroom("collecting activation metadata")
+                    tbar.set_postfix(
+                        {"ram usage": memory.percent, "ram available (GiB)": f"{memory.available / _GIB:.1f}"}
+                    )
             for layer_cache in cache.values():
                 for module_cache in layer_cache.values():
                     module_cache.set_num_samples(num_samples)
@@ -376,9 +421,10 @@ class BaseCalibCacheLoader(ABC):
                         except EarlyStopException:
                             pass
                         tbar.update(self.batch_size)
-                        tbar.set_postfix({"ram usage": psutil.virtual_memory().percent})
-                        if psutil.virtual_memory().percent > 90:
-                            raise RuntimeError("memory usage > 90%%, aborting")
+                        memory = _check_memory_headroom(f"collecting activations in {layer_name}")
+                        tbar.set_postfix(
+                            {"ram usage": memory.percent, "ram available (GiB)": f"{memory.available / _GIB:.1f}"}
+                        )
                         gc.collect()
                 else:
                     # region we then forward the layer to collect activations
@@ -397,9 +443,10 @@ class BaseCalibCacheLoader(ABC):
                         inputs = inputs.update(prev_layer_outputs[i]).to(device=device)
                         outputs = layer(*inputs.args, **inputs.kwargs)
                         layer_outputs.append(self._convert_layer_outputs(layer, outputs))
-                        tbar.set_postfix({"ram usage": psutil.virtual_memory().percent})
-                        if psutil.virtual_memory().percent > 90:
-                            raise RuntimeError("memory usage > 90%%, aborting")
+                        memory = _check_memory_headroom(f"forwarding activations through {layer_name}")
+                        tbar.set_postfix(
+                            {"ram usage": memory.percent, "ram available (GiB)": f"{memory.available / _GIB:.1f}"}
+                        )
                     prev_layer_outputs = layer_outputs
                     del inputs, outputs, layer_outputs
                     if (layer_idx == len(named_layers) - 1) or not use_prev_layer_outputs[layer_idx + 1]:
