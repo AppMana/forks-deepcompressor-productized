@@ -719,9 +719,9 @@ def quantize_cli(
         help="Use one smoothing candidate and randomized truncated SVD passes.",
     ),
     activation_aware: bool = typer.Option(
-        True,
+        False,
         "--activation-aware/--weight-svd",
-        help="Fit the W16A16 branch to W4A4 activation error; use --weight-svd for the released control.",
+        help="Use experimental activation-aware fitting; --weight-svd is the validated released default.",
     ),
     activation_damping: float = typer.Option(
         1e-4,

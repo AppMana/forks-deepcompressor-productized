@@ -6,10 +6,11 @@ calibration trajectories, run the released SVDQuant post-training quantization (
 Nunchaku-compatible fused INT4 W4A4 + BF16 W16A16 checkpoint, and compare its decoded pixels and speed with the
 original BF16 model.
 
-The current implementation is a PTQ pipeline. It does **not** train its low-rank branch with backpropagation. Its default
-activation-aware solver replaces weight-only residual SVD with reduced-rank regression over real W4A4 calibration
-activations, while preserving DeepCompressor's block order, `OutputsError` selection, Nunchaku checkpoint layout, and
-inference kernels. The released weight-only SVD remains available as a control.
+The current implementation is a PTQ pipeline. It does **not** train its low-rank branch with backpropagation. Its
+experimental activation-aware solver replaces weight-only residual SVD with reduced-rank regression over real W4A4
+calibration activations, while preserving DeepCompressor's block order, `OutputsError` selection, Nunchaku checkpoint
+layout, and inference kernels. The released weight-only SVD is the CLI default because it remains the best held-out
+raw-pixel result measured so far.
 
 ## Repository map
 
@@ -189,9 +190,9 @@ The current exact Anima recipe has these candidate bounds per calibrated project
 The fast Anima recipe uses one manual smoothing candidate and randomized SVD. `--num-iters` still controls residual
 passes.
 
-The product CLI defaults to `--activation-aware`. Candidate zero is the released weight-residual SVD and is scored as a
-real control. Later residual iterations solve activation-aware candidates, requantize `W - BA`, and let the unchanged
-DeepCompressor `OutputsError` accept or reject them. Use `--weight-svd` to run only the released candidate generator.
+The product CLI defaults to `--weight-svd`. With `--activation-aware`, candidate zero is still the released
+weight-residual SVD and is scored as a real control. Later residual iterations solve activation-aware candidates,
+requantize `W - BA`, and let the unchanged DeepCompressor `OutputsError` accept or reject them.
 
 Ten thousand examples do not imply ten thousand candidates. More examples reduce sampling error in candidate selection;
 they do not expand the candidate family or guarantee lower calibration error. The dataset loader now opens selected
@@ -276,6 +277,35 @@ MLflow records `low_rank_solver=activation-aware-rrr-spectral-ridge`, the weight
 token sampling, sample count, rank, and iteration count. If the pilot improves held-out raw pixels, increase the sample
 count while keeping those controls explicit. A later gradient-only polish of `A/B` can use the same DeepCompressor
 `OutputsError`, but it is not required by this solver and is not implemented yet.
+
+### Activation-aware experiment result
+
+The first activation-aware run exposed an underdetermined-covariance bug. Some 7,104-feature projections had only 6,400
+sampled activation rows, and damping scaled by mean feature variance allowed weakly observed directions to explode. The
+largest saved `||BA||` was `3981.02`, versus `349.42` for released weight-SVD. The corrected solver:
+
+- scales its ridge by an inexpensive power-iteration estimate of the covariance's largest eigenvalue;
+- adaptively increases that ridge only if finite-precision Cholesky still fails;
+- doubles the pilot to 128 sampled rows per cache; and
+- scores released weight-SVD as candidate zero instead of silently discarding it.
+
+This removed the numerical pathology: corrected `||BA||` has median `89.50`, mean `97.53`, and maximum `349.00`, compared
+with `91.04`, `99.83`, and `349.42` for weight-SVD. It also completed 28 low-rank blocks in `479.53 s`, down from
+`604.81 s` for the defective run because early stopping can retain candidate zero.
+
+The matched first-20 held-out raw-pixel gate was:
+
+| Recipe | Mean `1 - RGB_RMSE` | Minimum | End-to-end INT4 speedup |
+|---|---:|---:|---:|
+| Released rank-32 weight-SVD, 1 iteration | 0.751586 | 0.617823 | 1.399x |
+| Defective activation-aware, 4 iterations, `d=1e-4`, 64 rows | 0.613192 | 0.432628 | 1.392x |
+| Corrected spectral-ridge activation-aware, 4 iterations, `d=1e-3`, 128 rows | 0.740051 | 0.554164 | 1.392x |
+| Acceptance target | 0.990000 | 0.990000 | — |
+
+Thus the implementation bug is fixed, but activation-aware local `OutputsError` selection still does not improve global
+held-out decoded pixels. The corrected pilot was not promoted and did not proceed to the 100-image gate. Its complete
+recipe, checkpoint, images, and metrics are recorded in MLflow run
+[`bb0cf9f930584c509426e80815fc0aa3`](https://mlflow.appmana.com/#/experiments/76/runs/bb0cf9f930584c509426e80815fc0aa3).
 
 ## Validate raw pixels
 
